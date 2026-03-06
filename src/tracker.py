@@ -1,91 +1,104 @@
-import sqlite3
-import os
 import requests
-import google.generativeai as genai
+import os
 from dotenv import load_dotenv
+import google.generativeai as genai
+from supabase import create_client
 
-# --- Setup AI ---
+# --- Setup AI and Cloud DB ---
 load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 model = genai.GenerativeModel('gemini-2.5-flash')
 
-# --- Setup Database Path ---
-script_dir = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(script_dir, '..', 'data', 'sentiment_engine.db')
+supabase_url = os.getenv("SUPABASE_URL")
+supabase_key = os.getenv("SUPABASE_KEY")
+supabase = create_client(supabase_url, supabase_key)
 
-def get_products_to_track():
-    """Gets all products from the database that have the status 'tracking'."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, product_name FROM products WHERE status = 'tracking'")
-    active_products = cursor.fetchall() 
-    conn.close()
-    return active_products
-
-def save_sentiment(product_id, pros, cons):
-    """Saves the AI's pros and cons into our sentiment table."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO sentiment (product_id, pros, cons)
-        VALUES (?, ?, ?)
-    ''', (product_id, pros, cons))
-    conn.commit()
-    conn.close()
-    print(f"💾 SAVED SENTIMENT TO DATABASE!")
-
-def analyze_comments_with_ai(product_name, comments_text):
-    """Sends the internet comments to Gemini to find Pros and Cons."""
-    prompt = f"""
-    Analyze these comments. Extract a list of pros and cons regarding this product: '{product_name}'.
-    If there isn't much info, do your best to summarize what is there.
-    
-    Reply EXACTLY in this single-line format:
-    PROS: [list pros here] | CONS: [list cons here]
-    
-    Comments:
-    {comments_text}
-    """
-    response = model.generate_content(prompt)
-    return response.text.strip()
+def search_hacker_news(query):
+    """Searches Hacker News for recent comments about the target."""
+    url = f"https://hn.algolia.com/api/v1/search?query={query}&tags=comment"
+    try:
+        response = requests.get(url)
+        data = response.json()
+        # Grab top 3 comments and clean out newlines
+        comments = [hit['comment_text'].replace('\n', ' ') for hit in data.get('hits', [])[:3]]
+        return " ".join(comments)
+    except:
+        return ""
 
 def run_tracker():
-    print("Starting The Tracker...\n")
-    products = get_products_to_track()
+    print("Starting the V2 Batch Tracker...\n")
     
-    if not products:
-        print("No active products to track right now.")
+    # 1. Ask Supabase for everything we are tracking
+    response = supabase.table('targets').select('*').eq('status', 'tracking').execute()
+    targets = response.data
+    
+    if not targets:
+        print("No targets found in the database. Run the scout first!")
         return
+
+    # --- PHASE 1: GATHER ALL DATA (0 API Calls) ---
+    batch_payload = []
+    target_map = {} # We use this dictionary to remember which ID belongs to which name
+    
+    for t in targets:
+        name = t['name']
+        t_id = t['id']
         
-    for product_id, product_name in products:
-        print(f"Searching Hacker News for: {product_name}...")
-        url = f"http://hn.algolia.com/api/v1/search?query={product_name}"
-        response = requests.get(url)
-        hits = response.json().get('hits', [])
+        print(f"📡 Fetching HN comments for: {name}...")
+        comments = search_hacker_news(name)
         
-        # 1. Gather all the text from the top 5 forum posts/comments
-        combined_comments = ""
-        for hit in hits[:5]:
-            # The text could be hiding in different spots depending on if it's a post or a comment
-            text = hit.get('story_text') or hit.get('comment_text') or hit.get('title') or ""
-            combined_comments += text + " \n"
+        if comments.strip():
+            batch_payload.append(f"TARGET: {name}\nCOMMENTS: {comments}\n---")
+            target_map[name] = t_id
             
-        print("Analyzing comments with AI...")
+    if not batch_payload:
+        print("No internet chatter found for any targets today.")
+        return
+
+    print(f"\nGathered comments for {len(batch_payload)} targets.")
+    print("Sending ONE batch request to the AI...\n")
+    
+    # --- PHASE 2: BATCH AI ANALYSIS (1 API Call) ---
+    batch_text = "\n".join(batch_payload)
+    
+    prompt = f"""
+    You are a sentiment analysis engine. Read the following internet comments about various tech targets.
+    Identify the main Pros and Cons for EACH target based *only* on the comments provided.
+    
+    Format your response exactly like this, with one target per line:
+    [Target Name] | PROS: [short summary] | CONS: [short summary]
+    
+    Data:
+    {batch_text}
+    """
+    
+    try:
+        ai_response = model.generate_content(prompt)
+        lines = ai_response.text.strip().split('\n')
         
-        # 2. Give the gathered text to the AI
-        ai_result = analyze_comments_with_ai(product_name, combined_comments)
-        print(f"\nAI Analysis:\n{ai_result}\n")
+        for line in lines:
+            if "|" in line and "PROS:" in line and "CONS:" in line:
+                parts = line.split("|")
+                name_part = parts[0].strip()
+                pros_part = parts[1].replace("PROS:", "").strip()
+                cons_part = parts[2].replace("CONS:", "").strip()
+                
+                # Match the AI's name back to our database ID
+                t_id = target_map.get(name_part)
+                
+                if t_id:
+                    sentiment_data = {
+                        "target_id": t_id,
+                        "pros": pros_part,
+                        "cons": cons_part
+                    }
+                    supabase.table('sentiment').insert(sentiment_data).execute()
+                    print(f"   💾 SAVED SENTIMENT FOR: {name_part}")
+                    
+        print("\n✅ Tracker completed successfully.")
         
-        # 3. Split the AI's answer into Pros and Cons and save it
-        try:
-            parts = ai_result.split("|")
-            pros = parts[0].replace("PROS:", "").strip()
-            cons = parts[1].replace("CONS:", "").strip()
-            save_sentiment(product_id, pros, cons)
-        except Exception as e:
-            print("Oops, couldn't split the AI response correctly.")
-            
-        print("-" * 50)
+    except Exception as e:
+        print(f"⚠️ AI API Error (You might still be out of quota!): {e}")
 
 if __name__ == "__main__":
     run_tracker()

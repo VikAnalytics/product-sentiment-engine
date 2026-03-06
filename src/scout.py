@@ -1,73 +1,139 @@
 import feedparser
 import os
-import sqlite3
-import google.generativeai as genai
+import spacy
 from dotenv import load_dotenv
+import google.generativeai as genai
+from supabase import create_client
 
-# --- Setup AI ---
+# --- Setup AI and Cloud DB ---
 load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 model = genai.GenerativeModel('gemini-2.5-flash')
 
-# --- Setup Database Path ---
-script_dir = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(script_dir, '..', 'data', 'sentiment_engine.db')
+supabase_url = os.getenv("SUPABASE_URL")
+supabase_key = os.getenv("SUPABASE_KEY")
+supabase = create_client(supabase_url, supabase_key)
 
-RSS_URL = "https://techcrunch.com/feed/"
+# --- Setup Local NLP ---
+# Load the small English model
+nlp = spacy.load("en_core_web_sm")
 
-def save_to_database(product_name, description):
-    """Saves the discovered product into our SQLite database."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    # We use ? to safely insert data and prevent database errors
-    cursor.execute('''
-        INSERT INTO products (product_name, description, status)
-        VALUES (?, ?, 'tracking')
-    ''', (product_name, description))
-    
-    conn.commit()
-    conn.close()
-    print(f"💾 SAVED TO DATABASE: {product_name}")
+# The NLP "Lemmas" (Root Concepts)
+CORE_LEMMAS = {
+    "launch", "announce", "release", "unveil", "beta", "debut",
+    "acquire", "merge", "buy", "sell", "earn", "revenue", "profit",
+    "layoff", "fire", "resign", "hire", "depart",
+    "sue", "settle", "fine", "probe", "ban", "block",
+    "partner", "collaborate", "expand", "halt", "delay"
+}
 
-def analyze_article_with_ai(title, summary):
-    prompt = f"""
-    Read the following tech news article title and summary. 
-    Is this article announcing a brand-new tech product or major feature launch? 
-    If YES: Reply exactly in this format -> Product: [Name] | Description: [1-sentence summary]
-    If NO: Reply exactly with -> NONE
+# 1. The Multi-Source List
+RSS_FEEDS = [
+    "https://techcrunch.com/feed/",
+    "https://www.theverge.com/rss/index.xml",
+    "https://www.wired.com/feed/rss",
+    "https://www.engadget.com/rss.xml",
+    "https://www.zdnet.com/news/rss.xml"
+]
+
+def passes_filter(text):
+    """Uses NLP to break the article into root words and check our concepts."""
+    # Process the text through the spaCy brain
+    doc = nlp(text.lower())
     
-    Title: {title}
-    Summary: {summary}
-    """
-    response = model.generate_content(prompt)
-    return response.text.strip()
+    # Check every word's "lemma" (its base dictionary form)
+    for token in doc:
+        if token.lemma_ in CORE_LEMMAS:
+            return True # It hit a root concept! Pass it to the batch.
+            
+    return False # No root concepts found. Trash it.
+
+def save_target_to_db(target_type, name, description):
+    """Saves the extracted company or product to Supabase."""
+    target_type = target_type.strip().upper()
+    name = name.strip()
+    
+    if target_type not in ["COMPANY", "PRODUCT"]:
+        return
+
+    try:
+        existing = supabase.table('targets').select('*').eq('name', name).execute()
+        if len(existing.data) > 0:
+            print(f"   -> [{target_type}] {name} is already in the database. Skipping.")
+            return
+
+        data = {
+            "name": name,
+            "target_type": target_type,
+            "description": description,
+            "status": "tracking"
+        }
+        supabase.table('targets').insert(data).execute()
+        print(f"   💾 SAVED: [{target_type}] {name}")
+    except Exception as e:
+        print(f"   ❌ Database Error for {name}: {e}")
 
 def run_scout():
-    print(f"Scouting for news at: {RSS_URL}...\n")
+    print("Gathering articles from 5 sources...\n")
+    articles_to_analyze = []
     
-    # Let's test our fake article directly to make sure the database save works!
-    fake_title = "Apple Announces the New iPhone 20 Pro with Holographic Display"
-    fake_summary = "Today at Apple Park, the company unveiled its latest flagship smartphone featuring a revolutionary holographic projector and a 5-day battery life."
-    
-    print(f"Checking: {fake_title}")
-    ai_result = analyze_article_with_ai(fake_title, fake_summary)
-    print(f"AI Says: {ai_result}")
-    
-    # If the AI did NOT say "NONE", it means it found a product!
-    if ai_result != "NONE":
+    # --- PHASE 1: GATHER & FILTER (0 API Calls) ---
+    for feed_url in RSS_FEEDS:
         try:
-            # We split the AI's answer at the "|" symbol to separate the name and description
-            parts = ai_result.split("|")
-            
-            # Clean up the text to remove "Product: " and "Description: "
-            name = parts[0].replace("Product:", "").strip()
-            desc = parts[1].replace("Description:", "").strip()
-            
-            # Send the clean text to our database function
-            save_to_database(name, desc)
+            print(f"📡 Scanning: {feed_url}")
+            feed = feedparser.parse(feed_url)
+            # Grab top 10 from each site (50 articles total)
+            for entry in feed.entries[:10]: 
+                title = entry.title
+                summary = entry.get('summary', '')
+                
+                if passes_filter(title + " " + summary):
+                    articles_to_analyze.append(f"Title: {title}\nSummary: {summary}\n")
         except Exception as e:
-            print(f"Oops, couldn't parse the AI response: {e}")
+            print(f"Could not read {feed_url}: {e}")
+            
+    if not articles_to_analyze:
+        print("\nNo market-moving articles found today.")
+        return
+        
+    print(f"\nFiltered 50 raw articles down to {len(articles_to_analyze)} highly relevant ones.")
+    print("Sending ONE batch request to the AI...\n")
+    
+    # --- PHASE 2: BATCH AI ANALYSIS (1 API Call) ---
+    # Glue all the articles together into one big string
+    batch_text = "\n---\n".join(articles_to_analyze) 
+    
+    prompt = f"""
+    You are an expert tech market analyst. Read the following batch of news articles.
+    Extract EVERY major COMPANY event and EVERY new PRODUCT launch mentioned across all articles.
+    
+    Rules:
+    1. A single article might mention multiple companies and products. Extract all of them.
+    2. Format your response exactly like this, with one entity per line:
+    COMPANY | [Company Name] | [1-sentence summary of event]
+    PRODUCT | [Product Name] | [1-sentence summary of launch]
+    
+    Do not include any other conversational text, headers, or markdown. 
+    If absolutely nothing is found, output NONE.
+    
+    Articles:
+    {batch_text}
+    """
+    
+    try:
+        response = model.generate_content(prompt)
+        result_lines = response.text.strip().split('\n')
+        
+        for line in result_lines:
+            if "|" in line:
+                parts = line.split("|")
+                if len(parts) >= 3:
+                    save_target_to_db(parts[0], parts[1], parts[2])
+                    
+        print("\n✅ Scout completed successfully.")
+                    
+    except Exception as e:
+        print(f"\n⚠️ AI API Error (You might still be out of quota!): {e}")
 
 if __name__ == "__main__":
     run_scout()

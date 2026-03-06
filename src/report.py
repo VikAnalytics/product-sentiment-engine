@@ -1,92 +1,117 @@
-import sqlite3
 import os
-import google.generativeai as genai
+from datetime import datetime
 from dotenv import load_dotenv
+import google.generativeai as genai
+from supabase import create_client
 
-# --- Setup AI ---
+# --- Setup AI and Cloud DB ---
 load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 model = genai.GenerativeModel('gemini-2.5-flash')
 
-# --- Setup Paths ---
+supabase_url = os.getenv("SUPABASE_URL")
+supabase_key = os.getenv("SUPABASE_KEY")
+supabase = create_client(supabase_url, supabase_key)
+
 script_dir = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(script_dir, '..', 'data', 'sentiment_engine.db')
 REPORTS_DIR = os.path.join(script_dir, '..', 'reports')
 
-def get_product_sentiment():
-    """Gets the product and all its pros/cons from the database."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+def get_cloud_data():
+    """Pulls targets and their sentiment from Supabase."""
+    targets_response = supabase.table('targets').select('*').eq('status', 'tracking').execute()
+    targets = targets_response.data
     
-    # We ask the database to match our products with their sentiment feedback
-    cursor.execute('''
-        SELECT p.product_name, s.pros, s.cons 
-        FROM products p
-        JOIN sentiment s ON p.id = s.product_id
-        WHERE p.status = 'tracking'
-    ''')
-    
-    results = cursor.fetchall()
-    conn.close()
-    return results
+    if not targets:
+        return []
+        
+    full_data = []
+    for t in targets:
+        sentiment_response = supabase.table('sentiment').select('*').eq('target_id', t['id']).execute()
+        sentiments = sentiment_response.data
+        
+        # Combine all pros and cons for this target
+        all_pros = " ".join([s['pros'] for s in sentiments if s.get('pros') and s['pros'] != "None found"])
+        all_cons = " ".join([s['cons'] for s in sentiments if s.get('cons') and s['cons'] != "None found"])
+        
+        if all_pros or all_cons:
+            full_data.append({
+                "name": t['name'],
+                "type": t['target_type'],
+                "description": t['description'],
+                "pros": all_pros,
+                "cons": all_cons
+            })
+            
+    return full_data
 
-def generate_markdown_report(product_name, aggregated_feedback):
-    """Asks Gemini to write a professional markdown report."""
-    print(f"Asking AI to write the report for: {product_name}...")
+def generate_batch_report(data):
+    """Asks AI to write ONE master report for all targets."""
+    # 1. Assemble the massive payload
+    payload_lines = []
+    for item in data:
+        payload_lines.append(
+            f"[{item['type']}] {item['name']}\n"
+            f"Context: {item['description']}\n"
+            f"PROS: {item['pros']}\n"
+            f"CONS: {item['cons']}\n"
+            f"---"
+        )
+    batch_text = "\n".join(payload_lines)
     
-    # This is the strict format we are requesting from the AI
     prompt = f"""
-    You are an expert tech market analyst. Based on the following user data points, 
-    write a 300-word product analysis article formatted in Markdown. 
+    You are an expert tech market analyst. Write a "Daily Executive Market Report" 
+    based on the following raw sentiment data.
     
-    Structure the report with these exact headers:
-    # Product Analysis: {product_name}
-    ## Executive Summary
-    ## Top Pros
-    ## Top Cons
-    ## User Recommendations
+    Structure the report with these exact sections:
+    # 📈 Daily Executive Market Report
+    ## 🏢 Company Movements
+    (Summarize the sentiment and strategic outlook for the companies mentioned)
     
-    Here is the raw sentiment data gathered from the internet:
-    {aggregated_feedback}
+    ## 🚀 Product Intelligence
+    (Summarize the reception and outlook for the products mentioned)
+    
+    ## 💡 Key Takeaways
+    (Provide 2-3 strategic bullet points overall)
+    
+    Raw Data:
+    {batch_text}
     """
     
-    response = model.generate_content(prompt)
-    return response.text
+    try:
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        print(f"   ⚠️ AI Limit Hit. Generating Mock Executive Report instead.")
+        
+        # Fallback mock report
+        mock = "# 📈 Daily Executive Market Report (MOCK)\n\n*Data pending AI quota reset.*\n\n## Raw Data Summary\n\n"
+        for item in data:
+            mock += f"**{item['name']}** ({item['type']}):\n* Pros: {item['pros'][:75]}...\n* Cons: {item['cons'][:75]}...\n\n"
+        return mock
 
-def save_report(product_name, report_content):
-    """Saves the markdown report to a file."""
-    # 1. Create the 'reports' folder if it doesn't exist yet
+def save_report(report_content):
+    """Saves the markdown report to a file with today's date."""
     os.makedirs(REPORTS_DIR, exist_ok=True)
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    file_path = os.path.join(REPORTS_DIR, f"executive_report_{date_str}.md")
     
-    # 2. Create a safe file name (e.g., "iphone_20_pro_report.md")
-    safe_name = product_name.replace(" ", "_").lower()
-    file_path = os.path.join(REPORTS_DIR, f"{safe_name}_report.md")
-    
-    # 3. Save the AI's text into the new file
     with open(file_path, "w") as file:
         file.write(report_content)
         
-    print(f"📄 REPORT GENERATED! You can find it at: {file_path}")
+    print(f"   📄 MASTER REPORT GENERATED: {file_path}")
 
 def run_reporter():
-    print("Starting The Reporter...\n")
-    sentiment_data = get_product_sentiment()
+    print("Starting the V2 Batch Reporter...\n")
+    data = get_cloud_data()
     
-    if not sentiment_data:
-        print("No sentiment data found in the database yet.")
+    if not data:
+        print("No sentiment data found in the cloud yet.")
         return
         
-    # We will grab the very first product we find in the database
-    product_name = sentiment_data[0][0]
-    
-    # Combine all the pros and cons into one big block of text to show the AI
-    aggregated_feedback = ""
-    for row in sentiment_data:
-        aggregated_feedback += f"- PROS: {row[1]}\n- CONS: {row[2]}\n\n"
-        
-    # Generate and save the report!
-    report_content = generate_markdown_report(product_name, aggregated_feedback)
-    save_report(product_name, report_content)
+    print(f"Drafting single executive report for {len(data)} targets...")
+    report_content = generate_batch_report(data)
+    save_report(report_content)
+    print("\n✅ Reporter completed successfully.")
 
 if __name__ == "__main__":
     run_reporter()

@@ -16,20 +16,35 @@ supabase = create_client(supabase_url, supabase_key)
 script_dir = os.path.dirname(os.path.abspath(__file__))
 REPORTS_DIR = os.path.join(script_dir, '..', 'reports')
 
+from datetime import datetime, timedelta # <-- Make sure timedelta is imported at the top!
+
 def get_cloud_data():
-    """Pulls targets and their sentiment from Supabase."""
+    """Pulls targets and ONLY their sentiment from the last 24 hours."""
     targets_response = supabase.table('targets').select('*').eq('status', 'tracking').execute()
     targets = targets_response.data
     
     if not targets:
         return []
         
+    # Calculate the timestamp for 24 hours ago
+    yesterday_str = (datetime.utcnow() - timedelta(days=1)).isoformat()
+    
     full_data = []
     for t in targets:
-        sentiment_response = supabase.table('sentiment').select('*').eq('target_id', t['id']).execute()
+        # THE FIX: Only pull sentiment rows created AFTER yesterday
+        sentiment_response = supabase.table('sentiment')\
+            .select('*')\
+            .eq('target_id', t['id'])\
+            .gte('created_at', yesterday_str)\
+            .execute()
+            
         sentiments = sentiment_response.data
         
-        # Combine all pros and cons for this target
+        # If there is no fresh sentiment for this target today, skip it!
+        if not sentiments:
+            continue
+        
+        # Combine the fresh pros and cons
         all_pros = " ".join([s['pros'] for s in sentiments if s.get('pros') and s['pros'] != "None found"])
         all_cons = " ".join([s['cons'] for s in sentiments if s.get('cons') and s['cons'] != "None found"])
         

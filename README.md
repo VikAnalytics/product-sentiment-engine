@@ -1,30 +1,33 @@
 # 📈 Product Sentiment Engine
 
-An autonomous, serverless market intelligence platform that aggregates tech news, extracts market-moving events, and synthesizes multi-channel public sentiment. 
+An autonomous, serverless market intelligence platform that aggregates tech news, extracts market-moving events, and synthesizes multi-channel public sentiment.
 
-Designed to separate "signal" from "noise," this engine utilizes Natural Language Processing (NLP), Large Language Models (LLMs), and Vector Embeddings to mathematically deduplicate market chatter and generate executive-grade intelligence reports with absolute data provenance.
+Designed to separate "signal" from "noise," this engine uses Natural Language Processing (NLP), Large Language Models (LLMs), and Vector Embeddings to mathematically deduplicate market chatter and generate executive-grade intelligence reports with absolute data provenance.
 
 ## 🏗️ Architecture & Pipeline
 
-The pipeline runs entirely on autopilot via a decoupled CI/CD scheduler, executing daily in three distinct phases:
+The pipeline runs in three phases (manually or via CI/CD), with shared configuration and an **event-centric** data model so you can see which headline led to which sentiment.
 
 ### 1. The Scout (Ingestion & NLP Filtering)
-* Ingests RSS feeds from top tech publications (TechCrunch, The Verge, Wired, etc.).
-* Uses local NLP (`spaCy` lemmatization) to instantly filter noise and identify high-value articles based on root concepts (e.g., *acquire, launch, sue, layoff*).
-* Prompts Google Gemini (2.5 Flash) to perform Multi-Entity Extraction, parsing out the exact Companies and Products mentioned.
-* Upserts the structured entities to a relational cloud database (**Supabase**).
+
+* Ingests RSS feeds from top tech publications (TechCrunch, The Verge, Wired, Engadget, ZDNet).
+* Uses local NLP (`spaCy` lemmatization) to filter noise and keep articles that match root concepts (e.g. *acquire, launch, sue, layoff*).
+* Sends the filtered batch to Google Gemini (2.5 Flash) for multi-entity extraction: **Companies** and **Products** plus a one-sentence headline per entity.
+* Writes to **Supabase**: new entities go into `targets` and one row per headline into `events`. Existing targets get **new event rows** for new headlines (multiple events per company/product).
 
 ### 2. The Vector Intelligence Engine (Semantic Deduplication)
-* Scrapes multi-channel data streams (Hacker News APIs, Reddit APIs) using strict 24-hour temporal filters to capture fresh public chatter.
-* Converts unstructured internet noise into 768-dimensional mathematical coordinates using Gemini's Embedding Model (`text-embedding-004`).
-* Executes a **Cosine Similarity** search against historical data in a `pgvector` database. If the new chatter is mathematically identical to yesterday's complaints, it is silently discarded.
-* For statistically net-new signals, the LLM extracts strategic Pros, Cons, and verbatim "Voice of the Customer" quotes.
+
+* For each **target** and each of its **events**, fetches recent chatter from Hacker News and Reddit (24-hour window).
+* Builds a **headline-focused** search query (target name + event headline) so results are about that specific story, not generic brand chatter.
+* Converts chatter into a 768-dimensional vector using Gemini’s embedding API and runs a **cosine-similarity** check in `pgvector` (`match_sentiment`). Near-duplicate chatter for that event is discarded.
+* For net-new chatter, the LLM extracts Pros, Cons, and verbatim “Voice of the Customer” quotes, then saves one **sentiment** row linked to that **event** (`event_id`), so you know which event drove which sentiment.
 
 ### 3. The Reporter (Executive Synthesis)
-* Aggregates the verified, net-new daily intelligence.
-* Drafts a formatted "Market Intelligence Report" summarizing company movements and product outlooks.
-* Injects hyperlinked, verbatim user quotes directly into the report, ensuring executives can trace every insight back to its exact origin URL.
-* Automatically commits the Markdown report back to the repository for historical archiving.
+
+* Loads targets, their **events**, and sentiment from the last 24 hours (or configurable lookback).
+* Aggregates pros/cons/quotes **per event**, deduplicates repeated sentences, and truncates long fields to stay within model limits.
+* Asks Gemini to write a single **Market Intelligence Report** (Executive Summary, Target Deep Dives **per event**, Forward Outlook) with strict instructions to avoid repetition and to keep “Event: [headline]” visible so readers see which event caused which analysis.
+* Writes the report to `reports/market_intelligence_YYYY-MM-DD.md`. Override output directory with the `REPORTS_DIR` env var.
 
 ## 🚀 Key Engineering Wins
 
@@ -35,10 +38,12 @@ The pipeline runs entirely on autopilot via a decoupled CI/CD scheduler, executi
 
 ## 🛠️ Tech Stack
 
-* **Language:** Python 3.11
-* **AI / Generative:** Google Gemini 2.5 Flash API
-* **AI / Embeddings:** Google Gemini `text-embedding-004`
-* **NLP:** `spaCy` (en_core_web_sm)
-* **Database:** Supabase (PostgreSQL + `pgvector` extension)
-* **Automation:** GitHub Actions, cron-job.org
-* **Data Sources:** RSS (feedparser), Hacker News Algolia API, Reddit API
+| Layer | Technology |
+|-------|------------|
+| **Language** | Python 3.9+ (3.11 in CI) |
+| **AI / Generative** | Google Gemini 2.5 Flash |
+| **AI / Embeddings** | Google embedding API (model configurable in `config.py`; e.g. `text-embedding-004` or current equivalent) |
+| **NLP** | spaCy (`en_core_web_sm`) |
+| **Database** | Supabase (PostgreSQL + `pgvector`) |
+| **Automation** | GitHub Actions, cron-job.org (or any scheduler) |
+| **Data sources** | RSS (feedparser), Hacker News Algolia API, Reddit API |

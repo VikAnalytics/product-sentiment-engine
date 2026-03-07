@@ -1,43 +1,44 @@
 # 📈 Product Sentiment Engine
 
-An automated, cloud-native market intelligence pipeline that aggregates tech news, extracts market-moving events (product launches, M&A, leadership changes), and analyzes public sentiment using Natural Language Processing (NLP) and Large Language Models (LLMs).
+An autonomous, serverless market intelligence platform that aggregates tech news, extracts market-moving events, and synthesizes multi-channel public sentiment. 
+
+Designed to separate "signal" from "noise," this engine utilizes Natural Language Processing (NLP), Large Language Models (LLMs), and Vector Embeddings to mathematically deduplicate market chatter and generate executive-grade intelligence reports with absolute data provenance.
 
 ## 🏗️ Architecture & Pipeline
 
-This engine is designed to run entirely on autopilot via a decoupled CI/CD scheduler, utilizing batch processing to minimize API compute costs. 
+The pipeline runs entirely on autopilot via a decoupled CI/CD scheduler, executing daily in three distinct phases:
 
-The pipeline runs daily in three distinct phases:
+### 1. The Scout (Ingestion & NLP Filtering)
+* Ingests RSS feeds from top tech publications (TechCrunch, The Verge, Wired, etc.).
+* Uses local NLP (`spaCy` lemmatization) to instantly filter noise and identify high-value articles based on root concepts (e.g., *acquire, launch, sue, layoff*).
+* Prompts Google Gemini (2.5 Flash) to perform Multi-Entity Extraction, parsing out the exact Companies and Products mentioned.
+* Upserts the structured entities to a relational cloud database (**Supabase**).
 
-1. **The Scout (Ingestion & NLP Filtering)**
-   * Ingests RSS feeds from top tech publications (TechCrunch, The Verge, Wired, etc.).
-   * Uses local NLP (`spaCy` lemmatization) to instantly filter noise and identify high-value articles based on root concepts (e.g., *acquire, launch, sue, layoff*).
-   * Batches the filtered articles into a single, cost-optimized payload.
-   * Prompts Google Gemini (2.5 Flash) to perform Multi-Entity Extraction, parsing out the exact Companies and Products mentioned.
-   * Upserts the entities to a relational cloud database (**Supabase**).
+### 2. The Vector Intelligence Engine (Semantic Deduplication)
+* Scrapes multi-channel data streams (Hacker News APIs, Reddit APIs) using strict 24-hour temporal filters to capture fresh public chatter.
+* Converts unstructured internet noise into 768-dimensional mathematical coordinates using Gemini's Embedding Model (`text-embedding-004`).
+* Executes a **Cosine Similarity** search against historical data in a `pgvector` database. If the new chatter is mathematically identical to yesterday's complaints, it is silently discarded.
+* For statistically net-new signals, the LLM extracts strategic Pros, Cons, and verbatim "Voice of the Customer" quotes.
 
-2. **The Tracker (Sentiment Aggregation)**
-   * Pulls the active tracking list from the cloud database.
-   * Scrapes Hacker News APIs for public chatter and community sentiment surrounding each target.
-   * Batches the raw internet noise and uses Gemini to synthesize actionable `Pros` and `Cons` for each entity.
-   * Stores the structured sentiment data back in the cloud.
-
-3. **The Reporter (Executive Synthesis)**
-   * Aggregates the daily database records.
-   * Uses generative AI to draft a formatted "Daily Executive Market Report" summarizing company movements, product intelligence, and strategic takeaways.
-   * Automatically commits the Markdown report back to the repository for historical archiving.
+### 3. The Reporter (Executive Synthesis)
+* Aggregates the verified, net-new daily intelligence.
+* Drafts a formatted "Market Intelligence Report" summarizing company movements and product outlooks.
+* Injects hyperlinked, verbatim user quotes directly into the report, ensuring executives can trace every insight back to its exact origin URL.
+* Automatically commits the Markdown report back to the repository for historical archiving.
 
 ## 🚀 Key Engineering Wins
 
-* **Compute Cost Optimization:** Transitioned from a "Streaming" architecture (1 API call per article) to a "Batch Processing" architecture. By combining Python-based NLP pre-filtering with batch LLM payloads, daily API consumption was reduced by over 95%.
-* **Idempotent Data Flow:** Built database-level checks to prevent duplicate entity logging across multiple daily runs.
-* **Decoupled Automation:** Removed dependency on "always-on" web servers. The pipeline runs ephemerally via **GitHub Actions**, triggered securely by an external webhook cron job (`cron-job.org`).
+* **Semantic Deduplication (The Moat):** Transitioned from standard LLM summarization to Vector Math. By using `pgvector` to calculate the mathematical distance between today's market noise and yesterday's baseline, the engine guarantees that only true, net-new market signals reach the final report.
+* **Absolute Data Provenance:** Eliminated LLM hallucination risk by forcing strict URL attribution. Every extracted quote is hard-linked to its exact Reddit or Hacker News origin, ensuring 100% auditability for executive decision-making.
+* **Compute Cost Optimization:** Transitioned from a "Streaming" architecture to a "Batch Processing" architecture. By combining Python-based NLP pre-filtering, Vector deduplication, and batch LLM payloads, daily API token consumption was reduced by over 95%.
+* **Decoupled Automation:** The pipeline runs ephemerally via **GitHub Actions**, triggered securely by an external webhook cron job (`cron-job.org`), requiring zero "always-on" server infrastructure.
 
 ## 🛠️ Tech Stack
 
 * **Language:** Python 3.11
-* **AI / LLM:** Google Gemini 2.5 Flash API
+* **AI / Generative:** Google Gemini 2.5 Flash API
+* **AI / Embeddings:** Google Gemini `text-embedding-004`
 * **NLP:** `spaCy` (en_core_web_sm)
-* **Database:** Supabase (PostgreSQL)
+* **Database:** Supabase (PostgreSQL + `pgvector` extension)
 * **Automation:** GitHub Actions, cron-job.org
-* **Data Sources:** RSS (feedparser), Hacker News Algolia API
-
+* **Data Sources:** RSS (feedparser), Hacker News Algolia API, Reddit API

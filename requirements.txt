@@ -2,8 +2,5 @@ google-generativeai
 feedparser
 requests
 python-dotenv
-flask
-gunicorn
-requests
 spacy
 supabase

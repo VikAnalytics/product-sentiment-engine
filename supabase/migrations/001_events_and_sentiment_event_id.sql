@@ -1,10 +1,10 @@
 -- Multiple events per target: track which event caused which sentiment.
--- Run this in Supabase SQL Editor if you use the dashboard, or via Supabase CLI.
+-- Run after 000_initial_schema.sql. Safe to run on DBs that already have targets/sentiment.
 
 -- 1. Events table: one row per headline/event per target
 CREATE TABLE IF NOT EXISTS public.events (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  target_id uuid NOT NULL REFERENCES public.targets(id) ON DELETE CASCADE,
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  target_id bigint NOT NULL REFERENCES public.targets(id) ON DELETE CASCADE,
   headline text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now()
 );
@@ -13,23 +13,21 @@ CREATE INDEX IF NOT EXISTS idx_events_target_id ON public.events(target_id);
 
 -- 2. Link sentiment to an event (nullable for existing rows)
 ALTER TABLE public.sentiment
-  ADD COLUMN IF NOT EXISTS event_id uuid REFERENCES public.events(id) ON DELETE SET NULL;
+  ADD COLUMN IF NOT EXISTS event_id bigint REFERENCES public.events(id) ON DELETE SET NULL;
 
 CREATE INDEX IF NOT EXISTS idx_sentiment_event_id ON public.sentiment(event_id);
 
--- 3. Update match_sentiment RPC to optionally scope by event_id.
--- If your existing RPC has a different name or signature, adjust accordingly.
--- This version expects: query_embedding, match_threshold, p_target_id, p_event_id (optional).
+-- 3. Update match_sentiment to optionally scope by event_id
 CREATE OR REPLACE FUNCTION public.match_sentiment(
   query_embedding vector(768),
   match_threshold float,
-  p_target_id uuid,
-  p_event_id uuid DEFAULT NULL
+  p_target_id bigint,
+  p_event_id bigint DEFAULT NULL
 )
 RETURNS TABLE (
-  id uuid,
-  target_id uuid,
-  event_id uuid,
+  id bigint,
+  target_id bigint,
+  event_id bigint,
   similarity float
 )
 LANGUAGE plpgsql
@@ -44,6 +42,7 @@ BEGIN
   FROM public.sentiment s
   WHERE
     s.target_id = p_target_id
+    AND s.embedding IS NOT NULL
     AND ((p_event_id IS NULL AND s.event_id IS NULL) OR (p_event_id IS NOT NULL AND s.event_id = p_event_id))
     AND 1 - (s.embedding <=> query_embedding) > match_threshold
   ORDER BY s.embedding <=> query_embedding

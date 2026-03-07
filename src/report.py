@@ -1,5 +1,5 @@
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import google.generativeai as genai
 from supabase import create_client
@@ -16,8 +16,6 @@ supabase = create_client(supabase_url, supabase_key)
 script_dir = os.path.dirname(os.path.abspath(__file__))
 REPORTS_DIR = os.path.join(script_dir, '..', 'reports')
 
-from datetime import datetime, timedelta # <-- Make sure timedelta is imported at the top!
-
 def get_cloud_data():
     """Pulls targets and ONLY their sentiment from the last 24 hours."""
     targets_response = supabase.table('targets').select('*').eq('status', 'tracking').execute()
@@ -31,7 +29,7 @@ def get_cloud_data():
     
     full_data = []
     for t in targets:
-        # THE FIX: Only pull sentiment rows created AFTER yesterday
+        # Only pull sentiment rows created AFTER yesterday
         sentiment_response = supabase.table('sentiment')\
             .select('*')\
             .eq('target_id', t['id'])\
@@ -48,19 +46,31 @@ def get_cloud_data():
         all_pros = " ".join([s['pros'] for s in sentiments if s.get('pros') and s['pros'] != "None found"])
         all_cons = " ".join([s['cons'] for s in sentiments if s.get('cons') and s['cons'] != "None found"])
         
-        if all_pros or all_cons:
+        # NEW: Combine the quotes and dynamically embed the source URL as a markdown link
+        quotes_with_links = []
+        for s in sentiments:
+            if s.get('verbatim_quotes'):
+                quote = s['verbatim_quotes']
+                # If there's no URL for some reason, default to a # symbol
+                link = s.get('source_url', '#') 
+                quotes_with_links.append(f'"{quote}" - [View Source]({link})')
+                
+        all_quotes = " ".join(quotes_with_links)
+        
+        if all_pros or all_cons or all_quotes:
             full_data.append({
                 "name": t['name'],
                 "type": t['target_type'],
                 "description": t['description'],
                 "pros": all_pros,
-                "cons": all_cons
+                "cons": all_cons,
+                "quotes": all_quotes # Inject the new quotes into the payload
             })
             
     return full_data
 
 def generate_batch_report(data):
-    """Asks AI to write ONE master report for all targets."""
+    """Asks AI to write ONE master intelligence report for all targets."""
     # 1. Assemble the massive payload
     payload_lines = []
     for item in data:
@@ -69,26 +79,31 @@ def generate_batch_report(data):
             f"Context: {item['description']}\n"
             f"PROS: {item['pros']}\n"
             f"CONS: {item['cons']}\n"
+            f"VOICE OF CUSTOMER: {item['quotes']}\n"
             f"---"
         )
     batch_text = "\n".join(payload_lines)
     
     prompt = f"""
-    You are an expert tech market analyst. Write a "Daily Executive Market Report" 
+    You are a Principal Market Intelligence Analyst. Write a highly professional "Market Intelligence Report" 
     based on the following raw sentiment data.
     
-    Structure the report with these exact sections:
-    # 📈 Daily Executive Market Report
-    ## 🏢 Company Movements
-    (Summarize the sentiment and strategic outlook for the companies mentioned)
+    Structure the report precisely with these sections:
+    # 🌐 Daily Market Intelligence Report
     
-    ## 🚀 Product Intelligence
-    (Summarize the reception and outlook for the products mentioned)
+    ## 📊 Executive Summary
+    (A brief 2-paragraph macro view of today's market movements based on the data)
     
-    ## 💡 Key Takeaways
-    (Provide 2-3 strategic bullet points overall)
+    ## 🎯 Target Deep Dives
+    (For EVERY target provided, create a sub-section formatted exactly like this):
+    ### [Target Name]
+    * **Strategic Analysis:** (Your expert synthesis of the context, pros, and cons)
+    * **Voice of the Customer:** (Present the provided verbatim user quotes as bulleted blockquotes. YOU MUST KEEP THE [View Source](URL) MARKDOWN LINK INTACT AT THE END OF THE QUOTE).
     
-    Raw Data:
+    ## 🔭 Forward Outlook
+    (2-3 bullet points predicting where this sentiment might lead).
+    
+    Raw Intelligence:
     {batch_text}
     """
     
@@ -96,19 +111,20 @@ def generate_batch_report(data):
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        print(f"   ⚠️ AI Limit Hit. Generating Mock Executive Report instead.")
+        print(f"   ⚠️ AI Limit Hit. Generating Mock Intelligence Report instead.")
         
-        # Fallback mock report
-        mock = "# 📈 Daily Executive Market Report (MOCK)\n\n*Data pending AI quota reset.*\n\n## Raw Data Summary\n\n"
+        # Fallback mock report updated for V3
+        mock = "# 🌐 Daily Market Intelligence Report (MOCK)\n\n*Data pending AI quota reset.*\n\n## Raw Intelligence Summary\n\n"
         for item in data:
-            mock += f"**{item['name']}** ({item['type']}):\n* Pros: {item['pros'][:75]}...\n* Cons: {item['cons'][:75]}...\n\n"
+            mock += f"### {item['name']} ({item['type']})\n* **Pros:** {item['pros'][:75]}...\n* **Cons:** {item['cons'][:75]}...\n* **Quotes:** {item['quotes']}\n\n"
         return mock
 
 def save_report(report_content):
     """Saves the markdown report to a file with today's date."""
     os.makedirs(REPORTS_DIR, exist_ok=True)
     date_str = datetime.now().strftime("%Y-%m-%d")
-    file_path = os.path.join(REPORTS_DIR, f"executive_report_{date_str}.md")
+    # Updated file name to reflect the new Intelligence format
+    file_path = os.path.join(REPORTS_DIR, f"market_intelligence_{date_str}.md")
     
     with open(file_path, "w") as file:
         file.write(report_content)
@@ -116,14 +132,14 @@ def save_report(report_content):
     print(f"   📄 MASTER REPORT GENERATED: {file_path}")
 
 def run_reporter():
-    print("Starting the V2 Batch Reporter...\n")
+    print("Starting the V3 Intelligence Reporter...\n")
     data = get_cloud_data()
     
     if not data:
-        print("No sentiment data found in the cloud yet.")
+        print("No fresh intelligence data found for today.")
         return
         
-    print(f"Drafting single executive report for {len(data)} targets...")
+    print(f"Drafting comprehensive intelligence report for {len(data)} targets...")
     report_content = generate_batch_report(data)
     save_report(report_content)
     print("\n✅ Reporter completed successfully.")

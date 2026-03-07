@@ -24,6 +24,35 @@ def search_hacker_news(query):
         return " ".join(comments)
     except:
         return ""
+    
+def search_reddit(query):
+    """Searches Reddit for recent posts about the target."""
+    # We use URL encoding to handle spaces in target names (e.g. "Apple Vision")
+    formatted_query = query.replace(' ', '%20')
+    url = f"https://www.reddit.com/search.json?q={formatted_query}&sort=new&limit=3"
+    
+    # Reddit will block the request if we don't declare a custom User-Agent
+    headers = {"User-Agent": "ProductSentimentEngine/1.0"} 
+    
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code != 200:
+            return ""
+            
+        data = response.json()
+        posts = data.get('data', {}).get('children', [])
+        
+        # Extract the title and a snippet of the post body
+        comments = []
+        for post in posts:
+            title = post['data'].get('title', '')
+            body = post['data'].get('selftext', '')[:150] # Grab first 150 chars of body
+            comments.append(f"{title} - {body}".replace('\n', ' '))
+            
+        return " ".join(comments)
+    except Exception as e:
+        print(f"   ⚠️ Reddit fetch failed for {query}: {e}")
+        return ""
 
 def run_tracker():
     print("Starting the V2 Batch Tracker...\n")
@@ -36,19 +65,24 @@ def run_tracker():
         print("No targets found in the database. Run the scout first!")
         return
 
-    # --- PHASE 1: GATHER ALL DATA (0 API Calls) ---
+# --- PHASE 1: GATHER ALL DATA (0 API Calls) ---
     batch_payload = []
-    target_map = {} # We use this dictionary to remember which ID belongs to which name
+    target_map = {} 
     
     for t in targets:
         name = t['name']
         t_id = t['id']
         
-        print(f"📡 Fetching HN comments for: {name}...")
-        comments = search_hacker_news(name)
+        print(f"📡 Fetching internet chatter for: {name}...")
+        hn_comments = search_hacker_news(name)
+        reddit_posts = search_reddit(name)
         
-        if comments.strip():
-            batch_payload.append(f"TARGET: {name}\nCOMMENTS: {comments}\n---")
+        # Combine both data streams
+        combined_chatter = f"Hacker News: {hn_comments} | Reddit: {reddit_posts}"
+        
+        # Only add to the batch if we found chatter on at least one platform
+        if hn_comments.strip() or reddit_posts.strip():
+            batch_payload.append(f"TARGET: {name}\nCOMMENTS: {combined_chatter}\n---")
             target_map[name] = t_id
             
     if not batch_payload:

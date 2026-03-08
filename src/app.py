@@ -26,6 +26,11 @@ import requests
 from config import get_supabase
 
 try:
+    from postgrest.exceptions import APIError as PostgrestAPIError
+except ImportError:
+    PostgrestAPIError = None  # type: ignore[misc, assignment]
+
+try:
     from streamlit_searchbox import st_searchbox
     _SEARCHBOX_AVAILABLE = True
 except ImportError:
@@ -668,7 +673,30 @@ def main():
     if "selected_target_id" not in st.session_state:
         st.session_state["selected_target_id"] = None
 
-    targets = fetch_targets()
+    try:
+        targets = fetch_targets()
+    except Exception as e:
+        st.error(
+            "**Could not load targets from Supabase.** Check Streamlit Cloud → Settings → Secrets: "
+            "**SUPABASE_URL** and **SUPABASE_KEY** (use the **service_role** key from Supabase → Project Settings → API). "
+            "Ensure all migrations are applied (including `006_rls_read_policies.sql`)."
+        )
+        # Show PostgREST details when available (Streamlit redacts uncaught errors)
+        err_parts = []
+        if PostgrestAPIError and isinstance(e, PostgrestAPIError):
+            if getattr(e, "code", None):
+                err_parts.append(f"Code: {e.code}")
+            if getattr(e, "message", None):
+                err_parts.append(f"Message: {e.message}")
+            if getattr(e, "details", None):
+                err_parts.append(f"Details: {e.details}")
+            if getattr(e, "hint", None):
+                err_parts.append(f"Hint: {e.hint}")
+        if not err_parts:
+            err_parts.append(str(e))
+        st.code("\n".join(err_parts), language="text")
+        st.stop()
+
     selected_id = render_sidebar(targets, st.session_state["selected_target_id"])
     st.session_state["selected_target_id"] = selected_id
 

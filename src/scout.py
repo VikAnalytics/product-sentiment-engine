@@ -15,6 +15,8 @@ import feedparser
 import spacy
 
 from config import get_supabase, get_model, ARTICLES_PER_FEED
+from domain_resolver import resolve_domain
+from normalize import normalize_target_name
 
 logger = logging.getLogger(__name__)
 
@@ -73,17 +75,16 @@ def save_target_to_db(target_type: str, name: str, description: str) -> None:
 
     supabase = get_supabase()
     try:
+        new_headline = (description or "").strip()
         existing = supabase.table("targets").select("*").eq("name", name).execute()
         data_list = getattr(existing, "data", None)
-        new_headline = (description or "").strip()
 
         if data_list and len(data_list) > 0:
-            # Already tracking: add a new event (multiple events per target)
+            # Exact name match: add event to existing target
             target_id = data_list[0].get("id")
             if not target_id or not new_headline:
                 logger.info("   -> [%s] %s is already in the database. Skipping.", target_type, name)
                 return
-            # Avoid duplicate event: same target + same headline
             events_resp = supabase.table("events").select("id").eq("target_id", target_id).eq("headline", new_headline).execute()
             events_data = getattr(events_resp, "data", None) or []
             if events_data:
@@ -93,13 +94,34 @@ def save_target_to_db(target_type: str, name: str, description: str) -> None:
             logger.info("   📌 New event for [%s] %s: %s", target_type, name, new_headline[:60])
             return
 
-        # New target: insert target then one event
+        # No exact match: check normalized name to avoid "M4 iPad Air" vs "iPad Air M4" duplicates
+        all_same_type = supabase.table("targets").select("id, name").eq("target_type", target_type).execute()
+        same_type_list = getattr(all_same_type, "data", None) or []
+        norm_new = normalize_target_name(name)
+        for t in same_type_list:
+            if normalize_target_name(t.get("name") or "") == norm_new:
+                target_id = t.get("id")
+                if target_id and new_headline:
+                    events_resp = supabase.table("events").select("id").eq("target_id", target_id).eq("headline", new_headline).execute()
+                    if not (getattr(events_resp, "data", None) or []):
+                        supabase.table("events").insert({"target_id": target_id, "headline": new_headline}).execute()
+                        logger.info("   📌 New event for [%s] %s (matched normalized %s): %s", target_type, t.get("name"), name, new_headline[:60])
+                else:
+                    logger.info("   -> [%s] %s matches existing %s. Skipping new target.", target_type, name, t.get("name"))
+                return
+
+        # New target: insert target then one event. Only companies get domain/logo; products do not.
         row = {
             "name": name,
             "target_type": target_type,
             "description": new_headline,
             "status": "tracking",
         }
+        if (target_type or "").strip().upper() == "COMPANY":
+            domain = resolve_domain(name, target_type="company", use_ai=True)
+            if domain:
+                row["domain"] = domain
+                row["logo_url"] = f"https://logo.clearbit.com/{domain}"
         insert_result = supabase.table("targets").insert(row).execute()
         inserted = getattr(insert_result, "data", None)
         target_id = inserted[0].get("id") if inserted and len(inserted) > 0 else None

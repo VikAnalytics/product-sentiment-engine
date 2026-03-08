@@ -36,6 +36,16 @@ The pipeline runs in three phases (manually or via CI/CD), with shared configura
 * **Compute Cost Optimization:** Transitioned from a "Streaming" architecture to a "Batch Processing" architecture. By combining Python-based NLP pre-filtering, Vector deduplication, and batch LLM payloads, daily API token consumption was reduced by over 95%.
 * **Decoupled Automation:** The pipeline runs ephemerally via **GitHub Actions**, triggered securely by an external webhook cron job (`cron-job.org`), requiring zero "always-on" server infrastructure.
 
+## 📊 Running the dashboard
+
+From the **project root** (where this README is), start the Streamlit app:
+
+```bash
+streamlit run src/app.py
+```
+
+Use `src/app.py`, not `app.py` — the app lives in the `src/` folder. Ensure `.env` is in the project root with `SUPABASE_URL`, `SUPABASE_KEY`, and `GEMINI_API_KEY`.
+
 ## 🛠️ Tech Stack
 
 | Layer | Technology |

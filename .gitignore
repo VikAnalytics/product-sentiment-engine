@@ -1,2 +1,5 @@
 .env
-data/.DS_Store
+venv/
+.DS_Store
+*.pyc
+__pycache__/

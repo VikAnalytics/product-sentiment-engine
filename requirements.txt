@@ -4,3 +4,5 @@ requests
 python-dotenv
 spacy
 supabase
+streamlit
+streamlit-searchbox

@@ -16,8 +16,7 @@ from config import get_supabase, get_model, LOOKBACK_DAYS, MAX_PAYLOAD_CHARS_PER
 
 logger = logging.getLogger(__name__)
 
-script_dir = os.path.dirname(os.path.abspath(__file__))
-_default_reports_dir = os.path.normpath(os.path.join(script_dir, "..", "reports"))
+_default_reports_dir = os.path.normpath(os.path.join(_src_dir, "..", "reports"))
 REPORTS_DIR = os.environ.get("REPORTS_DIR") or _default_reports_dir
 if not os.path.isabs(REPORTS_DIR):
     REPORTS_DIR = os.path.abspath(REPORTS_DIR)
@@ -131,6 +130,7 @@ def get_cloud_data():
                     "pros": all_pros,
                     "cons": all_cons,
                     "quotes": all_quotes,
+                    "event_id": event_id,
                 })
 
     return full_data
@@ -210,6 +210,105 @@ def save_report(report_content: str) -> str:
     return file_path
 
 
+def _normalize_for_lookup(s: str) -> str:
+    """Normalize for matching: lowercase, collapse whitespace, remove punctuation."""
+    if not s:
+        return ""
+    s = (s or "").strip().lower()
+    s = re.sub(r"[^\w\s]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _build_event_lookup(supabase):
+    """Build normalized (target_name, headline) -> event_id; norm_target -> [event_id]; norm_target -> target_id."""
+    targets_resp = supabase.table("targets").select("id, name").execute()
+    targets_list = getattr(targets_resp, "data", None) or []
+    targets = {t["id"]: (t.get("name") or "").strip() for t in targets_list}
+    name_to_target_id = {_normalize_for_lookup(t.get("name") or ""): t["id"] for t in targets_list if t.get("id")}
+    events_resp = supabase.table("events").select("id, target_id, headline").execute()
+    events = getattr(events_resp, "data", None) or []
+    lookup = {}
+    by_target = {}
+    for e in events:
+        t_name = targets.get(e.get("target_id"), "").strip()
+        headline = (e.get("headline") or "").strip()
+        if t_name and e.get("id"):
+            key = (_normalize_for_lookup(t_name), _normalize_for_lookup(headline))
+            lookup[key] = e["id"]
+            nt = _normalize_for_lookup(t_name)
+            by_target.setdefault(nt, []).append(e["id"])
+    return lookup, by_target, name_to_target_id
+
+
+def parse_report_and_store_analyses(report_content: str) -> int:
+    """
+    Parse the generated report markdown, extract Strategic Analysis per target/event,
+    and write to events.cached_analysis so the dashboard can show it without calling Gemini.
+    Uses normalized (target, headline) so small formatting differences (e.g. NetChoice vs netchoice) still match.
+    Returns number of events updated.
+    """
+    supabase = get_supabase()
+    lookup, by_target, name_to_target_id = _build_event_lookup(supabase)
+    # Sections: ### Target | Event: headline or ### Target - Event: headline
+    section_re = re.compile(r"^###\s+(.+?)\s+[|\-]\s+Event:\s+(.+?)\s*$", re.MULTILINE)
+    analysis_re = re.compile(r"\*\s*\*\*Strategic Analysis:\*\*\s*(.+?)(?=\n\s*\*\s*\*\*|\n###|\n##|\Z)", re.DOTALL)
+    updated = 0
+    for m in section_re.finditer(report_content):
+        target_name = (m.group(1) or "").strip()
+        headline = (m.group(2) or "").strip()
+        start = m.end()
+        next_section = report_content.find("\n### ", start)
+        block = report_content[start : next_section] if next_section > 0 else report_content[start:]
+        am = analysis_re.search(block)
+        if not am:
+            continue
+        analysis_text = (am.group(1) or "").strip()
+        if not analysis_text:
+            continue
+        key = (_normalize_for_lookup(target_name), _normalize_for_lookup(headline))
+        event_id = lookup.get(key)
+        if not event_id and key[0]:
+            candidates = by_target.get(key[0], [])
+            if len(candidates) == 1:
+                event_id = candidates[0]
+        # If still no event (e.g. sentiment was event_id=null / "virtual" event), use existing or create one
+        if not event_id and key[0]:
+            target_id = name_to_target_id.get(key[0])
+            if target_id:
+                all_for_target = supabase.table("events").select("id, headline").eq("target_id", target_id).execute()
+                events_list = getattr(all_for_target, "data", None) or []
+                # Prefer exact headline match
+                for e in events_list:
+                    if (e.get("headline") or "").strip() == headline:
+                        event_id = e["id"]
+                        break
+                if not event_id and len(events_list) == 1:
+                    # Single event for this target: reuse it instead of creating a duplicate
+                    event_id = events_list[0]["id"]
+                elif not event_id and len(events_list) == 0:
+                    ins = supabase.table("events").insert({"target_id": target_id, "headline": headline}).execute()
+                    new_data = getattr(ins, "data", None) or []
+                    event_id = new_data[0]["id"] if new_data else None
+                    if event_id:
+                        logger.info("   Created event for %s (no event row existed); storing analysis.", target_name)
+                # If 2+ events and no headline match, we don't create another; skip to avoid more duplicates
+        if not event_id:
+            logger.debug("   Skipped section %s: no matching event or target.", target_name)
+            continue
+        try:
+            supabase.table("events").update({
+                "cached_analysis": analysis_text,
+                "cached_analysis_at": datetime.utcnow().isoformat(),
+            }).eq("id", event_id).execute()
+            updated += 1
+        except Exception as e:
+            logger.warning("   Failed to store analysis for event %s: %s", event_id, e)
+    if updated:
+        logger.info("   💾 Stored strategic analysis for %d event(s) (dashboard will use these).", updated)
+    return updated
+
+
 def run_reporter() -> None:
     """Load cloud data, generate report, save to file."""
     logger.info("Starting the V3 Intelligence Reporter...\n")
@@ -222,6 +321,8 @@ def run_reporter() -> None:
     logger.info("Drafting comprehensive intelligence report for %d targets...", len(data))
     report_content, is_mock = generate_batch_report(data)
     save_report(report_content)
+    # Always parse and store analyses from whatever we saved (real or mock; mock format just matches nothing)
+    parse_report_and_store_analyses(report_content)
     if is_mock:
         logger.info("(Mock report used due to AI limit.)")
     logger.info("✅ Reporter completed successfully.")
@@ -229,4 +330,16 @@ def run_reporter() -> None:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    run_reporter()
+    if len(sys.argv) > 1:
+        # Backfill: re-parse an existing report file and store analyses into events (no Gemini call)
+        path = sys.argv[1]
+        if not os.path.isfile(path):
+            logging.error("Report file not found: %s", path)
+            sys.exit(1)
+        with open(path, "r") as f:
+            content = f.read()
+        logging.info("Re-parsing report and storing strategic analyses: %s", path)
+        n = parse_report_and_store_analyses(content)
+        logging.info("✅ Stored strategic analysis for %d event(s). Refresh the dashboard.", n)
+    else:
+        run_reporter()

@@ -27,9 +27,10 @@ _genai_model = None
 _genai_configured = False
 
 
-def _validate_env() -> None:
-    """Ensure required env vars are set. Call before using any external service."""
-    missing = [k for k in REQUIRED_ENV if not os.getenv(k)]
+def _validate_env(*required: str) -> None:
+    """Ensure required env vars are set. Defaults to REQUIRED_ENV; pass a subset for e.g. dashboard-only."""
+    keys = required if required else REQUIRED_ENV
+    missing = [k for k in keys if not os.getenv(k)]
     if missing:
         raise RuntimeError(
             f"Missing required environment variable(s): {', '.join(missing)}. "
@@ -38,10 +39,10 @@ def _validate_env() -> None:
 
 
 def get_supabase():
-    """Return Supabase client. Validates env on first use."""
+    """Return Supabase client. Validates Supabase env on first use (dashboard can run without GEMINI_API_KEY)."""
     global _supabase_client
     if _supabase_client is None:
-        _validate_env()
+        _validate_env("SUPABASE_URL", "SUPABASE_KEY")
         from supabase import create_client
         url = os.getenv("SUPABASE_URL")
         key = os.getenv("SUPABASE_KEY")
@@ -53,7 +54,7 @@ def _configure_genai() -> None:
     global _genai_configured
     if _genai_configured:
         return
-    _validate_env()
+    _validate_env("GEMINI_API_KEY", "SUPABASE_URL", "SUPABASE_KEY")
     import google.generativeai as genai
     genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
     _genai_configured = True

@@ -684,12 +684,22 @@ def main():
         # Show PostgREST details when available (Streamlit redacts uncaught errors)
         err_parts = []
         if PostgrestAPIError and isinstance(e, PostgrestAPIError):
-            if getattr(e, "code", None):
+            code = getattr(e, "code", None)
+            details = getattr(e, "details", None) or ""
+            if code == "404" and ("<!DOCTYPE html" in str(details) or "supabase" in str(details).lower()):
+                st.warning(
+                    "**Wrong SUPABASE_URL.** You're getting a 404 HTML page instead of the API. "
+                    "In Supabase go to **Project Settings → API** and set **SUPABASE_URL** to the **Project URL** "
+                    "(e.g. `https://xxxx.supabase.co`), not the dashboard or app URL."
+                )
+            if code is not None:
                 err_parts.append(f"Code: {e.code}")
             if getattr(e, "message", None):
                 err_parts.append(f"Message: {e.message}")
-            if getattr(e, "details", None):
-                err_parts.append(f"Details: {e.details}")
+            if details and len(str(details)) < 500:
+                err_parts.append(f"Details: {details}")
+            elif details:
+                err_parts.append(f"Details: (truncated, {len(str(details))} chars)")
             if getattr(e, "hint", None):
                 err_parts.append(f"Hint: {e.hint}")
         if not err_parts:

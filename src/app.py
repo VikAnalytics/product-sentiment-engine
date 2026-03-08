@@ -24,6 +24,15 @@ from urllib.parse import urlparse
 import requests
 
 from config import get_supabase
+from sentiment_dedupe import (
+    dedupe_lines as _dedupe_lines,
+    normalize_for_dedupe as _normalize_for_dedupe,
+    to_bullet_lines as _to_bullet_lines,
+)
+try:
+    from consolidate_pros_cons import consolidate_bullet_points_with_ai
+except ImportError:
+    consolidate_bullet_points_with_ai = None
 
 try:
     from postgrest.exceptions import APIError as PostgrestAPIError
@@ -227,6 +236,16 @@ def fetch_sentiment_for_target_ungrouped(target_id: int):
     return getattr(resp, "data", None) or []
 
 
+def fetch_target_sentiment_summary(target_id: int):
+    """Fetch the AI-consolidated pros/cons for this target (one row per target). Returns dict or None."""
+    if target_id is None:
+        return None
+    supabase = get_supabase()
+    resp = supabase.table("target_sentiment_summary").select("pros, cons").eq("target_id", target_id).execute()
+    data = getattr(resp, "data", None) or []
+    return data[0] if data else None
+
+
 # -----------------------------------------------------------------------------
 # Filter low-value / placeholder sentiment (so we don't show "None identified" noise)
 # -----------------------------------------------------------------------------
@@ -266,41 +285,6 @@ def filter_meaningful_sentiment(sentiments: list) -> list:
 # -----------------------------------------------------------------------------
 # Aggregate and dedupe sentiment (avoid repeating same points across sources)
 # -----------------------------------------------------------------------------
-def _normalize_for_dedupe(text: str) -> str:
-    """Lowercase, strip punctuation, collapse spaces — for similarity check."""
-    if not text:
-        return ""
-    s = (text or "").strip().lower()
-    s = re.sub(r"[^\w\s]", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-
-def _dedupe_lines(lines: list) -> list:
-    """Drop duplicates and near-duplicates: keep longer when one is substring of other."""
-    if not lines:
-        return []
-    # Sort by normalized length descending so we keep the most complete version first
-    with_key = [(_normalize_for_dedupe(l), l) for l in lines if (l or "").strip()]
-    with_key.sort(key=lambda x: len(x[0]), reverse=True)
-    seen_keys = []
-    result = []
-    for key, original in with_key:
-        if not key:
-            continue
-        # Skip if this key is contained in an already-kept key, or vice versa
-        is_dup = False
-        for sk in seen_keys:
-            if key in sk or sk in key:
-                is_dup = True
-                break
-        if is_dup:
-            continue
-        seen_keys.append(key)
-        result.append(original.strip())
-    return result
-
-
 def aggregate_sentiment(sentiments: list) -> dict:
     """
     Merge many sentiment rows into one consolidated view with deduped pros/cons
@@ -327,57 +311,27 @@ def aggregate_sentiment(sentiments: list) -> dict:
         if key and key not in seen_quote_key:
             seen_quote_key.add(key)
             voice_deduped.append((quote, url))
+    # Pros/cons: use AI to keep only distinct differentiators when Gemini is configured
+    if os.getenv("GEMINI_API_KEY") and consolidate_bullet_points_with_ai:
+        try:
+            pros_out = consolidate_bullet_points_with_ai(all_pros, "pros")
+            cons_out = consolidate_bullet_points_with_ai(all_cons, "cons")
+        except Exception:
+            pros_out = _dedupe_lines(all_pros)
+            cons_out = _dedupe_lines(all_cons)
+    else:
+        pros_out = _dedupe_lines(all_pros)
+        cons_out = _dedupe_lines(all_cons)
     return {
-        "pros": _dedupe_lines(all_pros),
-        "cons": _dedupe_lines(all_cons),
+        "pros": pros_out,
+        "cons": cons_out,
         "voice": voice_deduped,
     }
 
 
 # -----------------------------------------------------------------------------
-# Insight text parsing (multi-line / bullet-friendly)
+# Insight text parsing (multi-line / bullet-friendly) — uses sentiment_dedupe.to_bullet_lines
 # -----------------------------------------------------------------------------
-def _to_bullet_lines(text: str):
-    """Split insight text into list of non-empty lines for bullet display.
-    Handles newlines, pipe, bullet chars, and long single-line text (sentence split)."""
-    if not text or not isinstance(text, str):
-        return []
-    raw = text.strip()
-    if not raw:
-        return []
-    # 1) Split by newline and " | " (AI-style separator)
-    lines = []
-    for part in raw.replace("\r\n", "\n").split("\n"):
-        for sub in part.split(" | "):
-            sub = sub.strip()
-            for prefix in ("•", "-", "*", "–", "—"):
-                if sub.startswith(prefix):
-                    sub = sub.lstrip(prefix).strip()
-            if sub and sub.lower() not in ("none", "n/a", "none found", "."):
-                lines.append(sub)
-    # 2) If we still have long one-liners (e.g. from DB with no newlines), split by sentences
-    result = []
-    for line in lines:
-        if len(line) > 100 and ". " in line:
-            # Sentence-style split so long one-liners become multiple bullets
-            parts = []
-            for sent in line.split(". "):
-                sent = sent.strip()
-                if not sent:
-                    continue
-                # Reattach common abbreviations to next part
-                if parts and parts[-1].lower() in ("e.g", "i.e", "dr", "mr", "ms", "etc"):
-                    parts[-1] = parts[-1] + ". " + sent + ("." if not sent.endswith(".") else "")
-                elif len(sent) >= 20 or " " in sent:
-                    parts.append(sent if sent.endswith(".") else sent + ".")
-                else:
-                    parts.append(sent)
-            result.extend(parts)
-        else:
-            result.append(line)
-    return result
-
-
 def _render_insight_block(
     label: str,
     text: str,
@@ -730,30 +684,36 @@ def main():
 
     render_timeline(events, get_sentiment)
 
-    # Show target-level (ungrouped) sentiment only if at least one row has real content
+    # Show target-level sentiment: use AI summary when available, else aggregate ungrouped rows
     ungrouped = fetch_sentiment_for_target_ungrouped(selected_id)
     meaningful_ungrouped = filter_meaningful_sentiment(ungrouped)
-    if meaningful_ungrouped:
+    summary = fetch_target_sentiment_summary(selected_id)
+    agg = aggregate_sentiment(meaningful_ungrouped) if meaningful_ungrouped else {"pros": [], "cons": [], "voice": []}
+    has_summary = summary and ((summary.get("pros") or "").strip() or (summary.get("cons") or "").strip())
+    if meaningful_ungrouped or has_summary:
         st.divider()
         st.markdown("### General sentiment (not tied to a specific event)")
-        st.caption("Sentiment for this target with no event link (e.g. from before events existed).")
-        # Render same pros/cons/voice layout as event cards, but without a second expander/headline
-        agg = aggregate_sentiment(meaningful_ungrouped)
+        st.caption(
+            "Sentiment for this target."
+            + (" From **target_sentiment_summary** (rule-based consolidated)." if has_summary else " From **ungrouped sentiment** rows (no summary for this target yet).")
+        )
+        pros_display = _to_bullet_lines(summary["pros"] or "") if has_summary else agg["pros"]
+        cons_display = _to_bullet_lines(summary["cons"] or "") if has_summary else agg["cons"]
         sources = list({(s.get("source_url") or "").strip() for s in meaningful_ungrouped if (s.get("source_url") or "").strip()})
         col1, col2, col3 = st.columns(3)
         with col1:
             st.markdown("**Pros**")
             st.markdown("---")
-            if agg["pros"]:
-                for line in agg["pros"]:
+            if pros_display:
+                for line in pros_display:
                     st.markdown(f"- {line}")
             else:
                 st.caption("_No pros recorded._")
         with col2:
             st.markdown("**Cons**")
             st.markdown("---")
-            if agg["cons"]:
-                for line in agg["cons"]:
+            if cons_display:
+                for line in cons_display:
                     st.markdown(f"- {line}")
             else:
                 st.caption("_No cons recorded._")

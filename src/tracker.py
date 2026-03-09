@@ -28,23 +28,32 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
+# When set to "1", run_tracker will not write new sentiment rows to the database.
+DRY_RUN = os.getenv("TRACKER_DRY_RUN") == "1"
+
 # Max extra words from description to add to search query (keeps API queries focused)
 SEARCH_CONTEXT_WORDS = 5
 
 
-def _search_query_from_context(name: str, description: str) -> str:
+def _search_query_from_context(name: str, target_type: str, description: str) -> str:
     """
     Build a search query focused on the headline/context we're tracking.
-    Uses name + first few meaningful words from description so results bias toward that topic.
+    - For products: just use the product name.
+    - For companies: use name + one meaningful keyword from the event/headline when available.
     """
+    name = (name or "").strip()
+    ttype = (target_type or "").strip().lower()
+    if ttype == "product":
+        return name
     if not description or not description.strip():
-        return name.strip()
-    # Take first N words, drop very short/noise words
+        return name
+    # Take first meaningful word (non-stopword) from description/headline
     stop = {"a", "an", "the", "of", "for", "in", "on", "to", "is", "and", "or", "by"}
     words = [w for w in description.strip().split() if len(w) > 1 and w.lower() not in stop][:SEARCH_CONTEXT_WORDS]
     if not words:
-        return name.strip()
-    return f"{name.strip()} {' '.join(words)}".strip()
+        return name
+    keyword = words[0]
+    return f"{name} {keyword}".strip()
 
 
 def search_hacker_news(query: str) -> str:
@@ -71,8 +80,14 @@ def search_hacker_news(query: str) -> str:
 def search_reddit(query: str) -> str:
     """Fetch recent Reddit posts for the query. Returns combined text or empty string on error."""
     formatted_query = query.replace(" ", "%20")
-    url = f"https://www.reddit.com/search.json?q={formatted_query}&sort=new&limit={REDDIT_SEARCH_LIMIT}&t=day"
-    headers = {"User-Agent": "ProductSentimentEngine/5.0"}
+    # Use api.reddit.com with a browser-like User-Agent; anonymous requests to www.reddit.com/search.json
+    # are often rate-limited or blocked with 403.
+    url = f"https://api.reddit.com/search?q={formatted_query}&sort=new&limit={REDDIT_SEARCH_LIMIT}&t=day&raw_json=1"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36",
+        "Accept": "application/json",
+    }
     try:
         response = requests.get(url, headers=headers, timeout=HTTP_TIMEOUT_SEC)
         if response.status_code != 200:
@@ -95,17 +110,30 @@ def search_reddit(query: str) -> str:
 
 
 def get_embedding(text: str) -> list:
-    """Converts text into an embedding vector. Raises on API or format error."""
-    import google.generativeai as genai
+    """Converts text into an embedding vector. Raises on API or format error.
+
+    Uses the newer google.genai client instead of the deprecated google.generativeai.embed_content.
+    """
+    from google import genai
+
     model_name = get_embedding_model_name()
-    result = genai.embed_content(
+    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    result = client.models.embed_content(
         model=model_name,
-        content=text,
-        task_type="semantic_similarity",
+        contents=text,
     )
-    if not result or "embedding" not in result:
-        raise ValueError("Embedding API did not return an 'embedding' field")
-    return result["embedding"]
+    # result.embeddings is typically a list with one embedding when contents is a single string
+    embeddings = getattr(result, "embeddings", None)
+    if not embeddings:
+        raise ValueError("Embedding API did not return embeddings")
+    first = embeddings[0]
+    # Handle either plain list or object with 'values' attribute
+    if isinstance(first, (list, tuple)):
+        return list(first)
+    values = getattr(first, "values", None)
+    if values is None:
+        raise ValueError("Embedding object missing 'values'")
+    return list(values)
 
 
 def _parse_ai_sentiment_line(line: str) -> Optional[dict]:
@@ -139,9 +167,18 @@ def run_tracker() -> None:
     today_str = datetime.utcnow().strftime("%Y-%m-%d")
     model = get_model()
 
+    # Optional cap: limit how many (target,event) searches we perform in a run.
+    # Useful for quick tests: set TRACKER_MAX_EVENTS=5 to only process the first 5 events.
+    try:
+        max_events = int(os.getenv("TRACKER_MAX_EVENTS", "0"))
+    except ValueError:
+        max_events = 0
+    events_processed = 0
+
     for t in targets:
         name = t.get("name")
         t_id = t.get("id")
+        target_type = (t.get("target_type") or "").strip()
         if name is None or t_id is None:
             logger.warning("Skipping target with missing name or id: %s", t)
             continue
@@ -153,6 +190,10 @@ def run_tracker() -> None:
             events_list = [{"id": None, "headline": (t.get("description") or "").strip() or "(general)"}]
 
         for event in events_list:
+            if max_events and events_processed >= max_events:
+                logger.info("Reached TRACKER_MAX_EVENTS=%s. Stopping early.", max_events)
+                return
+
             event_id = event.get("id")
             headline = (event.get("headline") or "").strip() or "(general)"
 
@@ -170,7 +211,7 @@ def run_tracker() -> None:
                     time.sleep(REQUEST_DELAY_BETWEEN_TARGETS_SEC)
                 continue
 
-            search_query = _search_query_from_context(name, headline)
+            search_query = _search_query_from_context(name, target_type, headline)
             logger.info("📡 Fetching intelligence for: %s | Event: %s (query: %s)...", name, headline[:50], search_query)
             hn_data = search_hacker_news(search_query)
             reddit_data = search_reddit(search_query)
@@ -187,31 +228,43 @@ def run_tracker() -> None:
                     time.sleep(REQUEST_DELAY_BETWEEN_TARGETS_SEC)
                 continue
 
+            events_processed += 1
+
+            chatter_vector = None
             try:
                 chatter_vector = get_embedding(combined_chatter)
             except Exception as e:
-                logger.warning("   ⚠️ Embedding API Error for %s: %s", name, e)
-                if REQUEST_DELAY_BETWEEN_TARGETS_SEC > 0:
-                    time.sleep(REQUEST_DELAY_BETWEEN_TARGETS_SEC)
-                continue
+                logger.warning(
+                    "   ⚠️ Embedding API Error for %s (skipping vector dedupe but continuing): %s",
+                    name,
+                    e,
+                )
 
-            rpc_params = {
-                "query_embedding": chatter_vector,
-                "match_threshold": MATCH_THRESHOLD,
-                "p_target_id": t_id,
-            }
-            if event_id is not None:
-                rpc_params["p_event_id"] = event_id
-            match_response = supabase.rpc("match_sentiment", rpc_params).execute()
+            # If we have an embedding, use match_sentiment for vector dedupe; otherwise skip dedupe and proceed.
+            if chatter_vector is not None:
+                rpc_params = {
+                    "query_embedding": chatter_vector,
+                    "match_threshold": MATCH_THRESHOLD,
+                    "p_target_id": t_id,
+                    # Always send p_event_id (can be None) so PostgREST can disambiguate
+                    # between the 3-arg and 4-arg match_sentiment overloads.
+                    "p_event_id": event_id,
+                }
+                match_response = supabase.rpc("match_sentiment", rpc_params).execute()
 
-            match_data = getattr(match_response, "data", None)
-            if match_data and len(match_data) > 0:
-                first = match_data[0]
-                similarity = first.get("similarity", 0)
-                logger.info("   🛑 Vector Match (Score: %.2f): %s [%s] redundant. Discarding.", similarity, name, headline[:40])
-                if REQUEST_DELAY_BETWEEN_TARGETS_SEC > 0:
-                    time.sleep(REQUEST_DELAY_BETWEEN_TARGETS_SEC)
-                continue
+                match_data = getattr(match_response, "data", None)
+                if match_data and len(match_data) > 0:
+                    first = match_data[0]
+                    similarity = first.get("similarity", 0)
+                    logger.info(
+                        "   🛑 Vector Match (Score: %.2f): %s [%s] redundant. Discarding.",
+                        similarity,
+                        name,
+                        headline[:40],
+                    )
+                    if REQUEST_DELAY_BETWEEN_TARGETS_SEC > 0:
+                        time.sleep(REQUEST_DELAY_BETWEEN_TARGETS_SEC)
+                    continue
 
             tracking_context = headline
             prompt = f"""
@@ -242,8 +295,11 @@ def run_tracker() -> None:
                     }
                     if event_id is not None:
                         insert_row["event_id"] = event_id
-                    supabase.table("sentiment").insert(insert_row).execute()
-                    logger.info("   💾 SAVED NET-NEW INTELLIGENCE: %s [%s]", name, headline[:50])
+                    if DRY_RUN:
+                        logger.info("   💾 [DRY RUN] Would save net-new intelligence for %s [%s]", name, headline[:50])
+                    else:
+                        supabase.table("sentiment").insert(insert_row).execute()
+                        logger.info("   💾 SAVED NET-NEW INTELLIGENCE: %s [%s]", name, headline[:50])
                 else:
                     logger.warning("   ⚠️ AI output format error for %s.", name)
             except Exception as e:

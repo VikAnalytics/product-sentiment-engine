@@ -12,7 +12,9 @@ REQUIRED_ENV = ("GEMINI_API_KEY", "SUPABASE_URL", "SUPABASE_KEY")
 
 # --- Tunable constants (single place to change behavior) ---
 GEMINI_MODEL_NAME = "gemini-2.5-flash"
-EMBEDDING_MODEL = "models/text-embedding-004"
+# Embedding model listed for your key as: models/gemini-embedding-001
+# For the newer client we pass it without the 'models/' prefix.
+EMBEDDING_MODEL = "gemini-embedding-001"
 MATCH_THRESHOLD = 0.82
 HTTP_TIMEOUT_SEC = 15
 REQUEST_DELAY_BETWEEN_TARGETS_SEC = 1.0

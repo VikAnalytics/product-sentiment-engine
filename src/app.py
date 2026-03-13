@@ -255,6 +255,11 @@ _PLACEHOLDER_PHRASES = (
     "comments refer to", "refer to \"", "no items recorded", "no verbatims for this source",
 )
 
+# Longer boilerplate sentences we never want to show (model fallback when there is no signal)
+_LONG_PLACEHOLDER_PHRASES = (
+    "no information found in the chatter regarding market sentiment",
+)
+
 
 def _text_is_placeholder(text: str) -> bool:
     """True if text is empty or a known placeholder / no-signal phrase."""
@@ -263,6 +268,11 @@ def _text_is_placeholder(text: str) -> bool:
     s = text.strip().lower()
     if not s:
         return True
+    # Always treat these longer boilerplate phrases as placeholders, regardless of length
+    for p in _LONG_PLACEHOLDER_PHRASES:
+        if p in s:
+            return True
+    # For the shorter phrases, only treat as placeholder when the whole field is small
     for p in _PLACEHOLDER_PHRASES:
         if p in s and len(s) < 120:
             return True
@@ -548,7 +558,7 @@ def render_event_card(event: dict, sentiments: list) -> None:
     with st.expander(label, expanded=True):
         if not sentiments:
             st.caption(
-                "_No sentiment for this event yet._ The tracker runs on HN/Reddit and saves "
+                "_No new chatter for this event._ The tracker runs on HN/Reddit and saves "
                 "pros, cons, and quotes per event when it finds net-new signal."
             )
             return

@@ -9,6 +9,7 @@ from typing import Optional
 
 import requests
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 
 # Allow importing config when running as python src/tracker.py from repo root
 _src_dir = os.path.dirname(os.path.abspath(__file__))
@@ -30,6 +31,36 @@ logger = logging.getLogger(__name__)
 
 # When set to "1", run_tracker will not write new sentiment rows to the database.
 DRY_RUN = os.getenv("TRACKER_DRY_RUN") == "1"
+
+# Optional logging controls (useful for cron)
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_FILE = os.getenv("LOG_FILE", "").strip()  # e.g. logs/tracker.log
+
+
+def _configure_logging() -> None:
+    level = getattr(logging, LOG_LEVEL, logging.INFO)
+    root = logging.getLogger()
+    root.setLevel(level)
+
+    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+
+    # Avoid duplicate handlers if module reloaded
+    if not any(isinstance(h, logging.StreamHandler) for h in root.handlers):
+        sh = logging.StreamHandler()
+        sh.setFormatter(fmt)
+        sh.setLevel(level)
+        root.addHandler(sh)
+
+    if LOG_FILE:
+        try:
+            os.makedirs(os.path.dirname(LOG_FILE) or ".", exist_ok=True)
+            fh = RotatingFileHandler(LOG_FILE, maxBytes=2_000_000, backupCount=3)
+            fh.setFormatter(fmt)
+            fh.setLevel(level)
+            root.addHandler(fh)
+        except Exception as e:
+            # Fall back to console only
+            root.warning("Failed to set LOG_FILE=%s (%s). Continuing with console logging.", LOG_FILE, e)
 
 # Max extra words from description to add to search query (keeps API queries focused)
 SEARCH_CONTEXT_WORDS = 5
@@ -64,6 +95,7 @@ def search_hacker_news(query: str) -> str:
         response = requests.get(url, timeout=HTTP_TIMEOUT_SEC)
         response.raise_for_status()
         hits = response.json().get("hits", [])[:HN_SEARCH_LIMIT]
+        logger.debug("HN query=%r hits=%s", query, len(hits))
         comments = []
         for hit in hits:
             raw_text = hit.get("comment_text", "") or ""
@@ -91,9 +123,10 @@ def search_reddit(query: str) -> str:
     try:
         response = requests.get(url, headers=headers, timeout=HTTP_TIMEOUT_SEC)
         if response.status_code != 200:
-            logger.warning("Reddit returned %s for %s", response.status_code, query)
+            logger.warning("Reddit returned %s for query=%r", response.status_code, query)
             return ""
         children = response.json().get("data", {}).get("children", [])
+        logger.debug("Reddit query=%r children=%s", query, len(children))
         comments = []
         for p in children:
             data = p.get("data", {}) or {}
@@ -157,7 +190,7 @@ def _parse_ai_sentiment_line(line: str) -> Optional[dict]:
 
 def run_tracker() -> None:
     """For each tracking target and each of its events, fetch chatter, vector-filter, extract sentiment, and save if net-new."""
-    logger.info("Starting the V5 Enterprise Vector Engine (per-event)...\n")
+    logger.info("Starting tracker (per-event). dry_run=%s max_events=%s", DRY_RUN, os.getenv("TRACKER_MAX_EVENTS", "0"))
     supabase = get_supabase()
     targets_result = supabase.table("targets").select("*").eq("status", "tracking").execute()
     targets = getattr(targets_result, "data", None) or []
@@ -212,7 +245,7 @@ def run_tracker() -> None:
                 continue
 
             search_query = _search_query_from_context(name, target_type, headline)
-            logger.info("📡 Fetching intelligence for: %s | Event: %s (query: %s)...", name, headline[:50], search_query)
+            logger.info("📡 %s | %s | query=%r", name, headline[:80], search_query)
             hn_data = search_hacker_news(search_query)
             reddit_data = search_reddit(search_query)
 
@@ -223,7 +256,7 @@ def run_tracker() -> None:
                 combined_chatter += f"[SOURCE: Reddit] {reddit_data}"
 
             if not combined_chatter.strip():
-                logger.info("   -> No fresh chatter for this event.")
+                logger.info("   -> No fresh chatter (hn=%s reddit=%s).", bool(hn_data), bool(reddit_data))
                 if REQUEST_DELAY_BETWEEN_TARGETS_SEC > 0:
                     time.sleep(REQUEST_DELAY_BETWEEN_TARGETS_SEC)
                 continue
@@ -312,5 +345,5 @@ def run_tracker() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    _configure_logging()
     run_tracker()

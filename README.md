@@ -1,59 +1,84 @@
-# 📈 Product Sentiment Engine
+## Product Sentiment Engine
 
-An autonomous, serverless market intelligence platform that aggregates tech news, extracts market-moving events, and synthesizes multi-channel public sentiment.
+### Who this is for
 
-Designed to separate "signal" from "noise," this engine uses Natural Language Processing (NLP), Large Language Models (LLMs), and Vector Embeddings to mathematically deduplicate market chatter and generate executive-grade intelligence reports with absolute data provenance.
+This repo is designed for **MBB partners, PE/VC investors, and strategy leaders** who want a *single place* to see:
 
-## 🏗️ Architecture & Pipeline
+- **What changed** for your companies and products (news events).
+- **How the market reacted** (pros, cons, and real customer quotes).
+- **What to do about it** (executive-ready written reports).
 
-The pipeline runs in three phases (manually or via CI/CD), with shared configuration and an **event-centric** data model so you can see which headline led to which sentiment.
+You should be able to open the dashboard and answer, in minutes, questions like:
 
-### 1. The Scout (Ingestion & NLP Filtering)
+- “What are the last 3 meaningful events for Nvidia and Anthropic?”  
+- “Is sentiment getting better or worse, and why?”  
+- “Where is the market actually complaining (pricing, performance, trust, UX)?”
 
-* Ingests RSS feeds from top tech publications (TechCrunch, The Verge, Wired, Engadget, ZDNet).
-* Uses local NLP (`spaCy` lemmatization) to filter noise and keep articles that match root concepts (e.g. *acquire, launch, sue, layoff*).
-* Sends the filtered batch to Google Gemini (2.5 Flash) for multi-entity extraction: **Companies** and **Products** plus a one-sentence headline per entity.
-* Writes to **Supabase**: new entities go into `targets` and one row per headline into `events`. Existing targets get **new event rows** for new headlines (multiple events per company/product).
+The underlying system is fully transparent and auditable; every insight can be traced back to specific HN/Reddit threads or articles.
 
-### 2. The Vector Intelligence Engine (Semantic Deduplication)
+### What the system does
 
-* For each **target** and each of its **events**, fetches recent chatter from Hacker News and Reddit (24-hour window).
-* Builds a **headline-focused** search query (target name + event headline) so results are about that specific story, not generic brand chatter.
-* Converts chatter into a 768-dimensional vector using Gemini’s embedding API and runs a **cosine-similarity** check in `pgvector` (`match_sentiment`). Near-duplicate chatter for that event is discarded.
-* For net-new chatter, the LLM extracts Pros, Cons, and verbatim “Voice of the Customer” quotes, then saves one **sentiment** row linked to that **event** (`event_id`), so you know which event drove which sentiment.
+- **Ingests tech news** from top RSS feeds and turns each headline into a structured **event** for a company or product.
+- **Scans public chatter** (Hacker News + Reddit) around each event and keeps only *non-duplicative* signals.
+- **Extracts sentiment** as:
+  - **Pros**: what the market likes.
+  - **Cons**: what the market criticizes.
+  - **Voice of the customer**: verbatim quotes with source links.
+- **Surfaces intelligence** in two ways:
+  - A **Streamlit dashboard** for day-to-day monitoring (events timeline + company sentiment).
+  - A written **Market Intelligence Report** for board decks and IC memos.
 
-### 3. The Reporter (Executive Synthesis)
+### How to use the dashboard (executive view)
 
-* Loads targets, their **events**, and sentiment from the last 24 hours (or configurable lookback).
-* Aggregates pros/cons/quotes **per event**, deduplicates repeated sentences, and truncates long fields to stay within model limits.
-* Asks Gemini to write a single **Market Intelligence Report** (Executive Summary, Target Deep Dives **per event**, Forward Outlook) with strict instructions to avoid repetition and to keep “Event: [headline]” visible so readers see which event caused which analysis.
-* Writes the report to `reports/market_intelligence_YYYY-MM-DD.md`. Override output directory with the `REPORTS_DIR` env var.
+1. Open the deployed Streamlit app (or run it locally with `streamlit run src/app.py`).
+2. Use the **sidebar** to select a company or product.
+3. For the selected target you will see:
+   - **Events & sentiment**: a timeline of recent events; expand each to see pros, cons, and customer quotes.
+   - **Company sentiment**: consolidated, deduplicated pros/cons and source links not tied to a specific event.
+4. When there is no real signal for an event, the dashboard explicitly shows **“No new chatter for this event.”**
 
-## 🚀 Key Engineering Wins
+If you only care about consuming insights, you can stop here. The rest of the documentation is for the team operating the system.
 
-* **Semantic Deduplication (The Moat):** Transitioned from standard LLM summarization to Vector Math. By using `pgvector` to calculate the mathematical distance between today's market noise and yesterday's baseline, the engine guarantees that only true, net-new market signals reach the final report.
-* **Absolute Data Provenance:** Eliminated LLM hallucination risk by forcing strict URL attribution. Every extracted quote is hard-linked to its exact Reddit or Hacker News origin, ensuring 100% auditability for executive decision-making.
-* **Compute Cost Optimization:** Transitioned from a "Streaming" architecture to a "Batch Processing" architecture. By combining Python-based NLP pre-filtering, Vector deduplication, and batch LLM payloads, daily API token consumption was reduced by over 95%.
-* **Decoupled Automation:** The pipeline runs ephemerally via **GitHub Actions**, triggered securely by an external webhook cron job (`cron-job.org`), requiring zero "always-on" server infrastructure.
+### How it works (one-page architecture)
 
-## 📊 Running the dashboard
+The engine runs in three stages, all driven by configuration in `src/config.py` and a Supabase/Postgres schema under `supabase/migrations/`:
 
-From the **project root** (where this README is), start the Streamlit app:
+- **1. Scout – Discover companies, products, and events**
+  - Reads RSS from TechCrunch, The Verge, Wired, Engadget, ZDNet.
+  - Uses spaCy to keep only articles that match “material” concepts (launches, acquisitions, layoffs, probes, etc.).
+  - Uses Gemini to extract **targets** (companies/products) and write:
+    - `targets` table: one row per company or product.
+    - `events` table: one row per headline per target, with a short description.
 
-```bash
-streamlit run src/app.py
-```
+- **2. Tracker – Market sentiment per event**
+  - For each `target` + `event`, builds a focused search query and fetches recent chatter from **Hacker News** and **Reddit**.
+  - Embeds the combined chatter with `gemini-embedding-001` and uses `pgvector` to run a **similarity check** (`match_sentiment`) so we only keep net-new information.
+  - For non-duplicate chatter, prompts Gemini to output **“PROS | CONS | QUOTES | URL”** and writes one `sentiment` row linked to that `event`.
 
-Use `src/app.py`, not `app.py` — the app lives in the `src/` folder. Ensure `.env` is in the project root with `SUPABASE_URL`, `SUPABASE_KEY`, and `GEMINI_API_KEY`.
+- **3. Reporter – Executive report**
+  - Aggregates events and sentiment for a lookback window.
+  - Deduplicates repeated pros/cons and quotes.
+  - Asks Gemini to draft a report with:
+    - **Executive summary**,
+    - **Per-target / per-event analysis**, and
+    - **Forward-looking implications**.
+  - Saves to `reports/market_intelligence_YYYY-MM-DD.md`.
 
-## 🛠️ Tech Stack
+### Operations, setup, and deployment
 
-| Layer | Technology |
-|-------|------------|
-| **Language** | Python 3.9+ (3.11 in CI) |
-| **AI / Generative** | Google Gemini 2.5 Flash |
-| **AI / Embeddings** | Google embedding API (model configurable in `config.py`; e.g. `text-embedding-004` or current equivalent) |
-| **NLP** | spaCy (`en_core_web_sm`) |
-| **Database** | Supabase (PostgreSQL + `pgvector`) |
-| **Automation** | GitHub Actions, cron-job.org (or any scheduler) |
-| **Data sources** | RSS (feedparser), Hacker News Algolia API, Reddit API |
+- **Setup & local runs** (cloning the repo, `.env`, Supabase, Gemini key, running `scout`, `tracker`, and `report`):
+  - See **`SETUP.md`**.
+- **Deploying the Streamlit dashboard** (Streamlit Community Cloud):
+  - See **`DEPLOY.md`**.
+- **Supabase schema** (tables, RLS, and functions):
+  - See SQL migrations under **`supabase/migrations/`**.
+
+### Technology overview
+
+- **Language**: Python 3.9+  
+- **LLM**: Google Gemini 2.5 Flash  
+- **Embeddings**: `gemini-embedding-001` via the Gemini API  
+- **Database**: Supabase (PostgreSQL + `pgvector`)  
+- **UI**: Streamlit dashboard (`src/app.py`)  
+- **Automation**: GitHub Actions + external cron (or any scheduler)  
+- **Data sources**: RSS feeds, Hacker News Algolia API, Reddit API

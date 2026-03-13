@@ -258,6 +258,8 @@ _PLACEHOLDER_PHRASES = (
 # Longer boilerplate sentences we never want to show (model fallback when there is no signal)
 _LONG_PLACEHOLDER_PHRASES = (
     "no information found in the chatter regarding market sentiment",
+    "no information on the target topic in the provided chatter",
+    "no relevant quotes on the target topic in the provided chatter",
 )
 
 
@@ -702,7 +704,7 @@ def main():
     has_summary = summary and ((summary.get("pros") or "").strip() or (summary.get("cons") or "").strip())
     if meaningful_ungrouped or has_summary:
         st.divider()
-        st.markdown("### General sentiment (not tied to a specific event)")
+        st.markdown("### Company sentiment")
         st.caption(
             "Sentiment for this target."
             + (" From **target_sentiment_summary** (rule-based consolidated)." if has_summary else " From **ungrouped sentiment** rows (no summary for this target yet).")

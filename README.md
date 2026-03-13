@@ -2,7 +2,7 @@
 
 ### Who this is for
 
-This repo is designed for **MBB partners, PE/VC investors, and strategy leaders** who want a *single place* to see:
+This repo is designed for **Strategy Leaders** who want a *single place* to see:
 
 - **What changed** for your companies and products (news events).
 - **How the market reacted** (pros, cons, and real customer quotes).

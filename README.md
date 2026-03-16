@@ -52,7 +52,8 @@ The engine runs in three stages, all driven by configuration in `src/config.py` 
 
 - **2. Tracker – Market sentiment per event**
   - For each `target` + `event`, builds a focused search query and fetches recent chatter from **Hacker News** and **Reddit**.
-  - Embeds the combined chatter with `gemini-embedding-001` and uses `pgvector` to run a **similarity check** (`match_sentiment`) so we only keep net-new information.
+  - Embeds the combined chatter with a **local sentence‑transformer model** (no external API calls) and uses `pgvector` to run a **similarity check** (`match_sentiment`) so we only keep net-new information.
+  - Adds an extra **exact‑text guard**: if an identical pros/cons/quotes triple already exists for that event, it skips writing another row (even across days or model changes).
   - For non-duplicate chatter, prompts Gemini to output **“PROS | CONS | QUOTES | URL”** and writes one `sentiment` row linked to that `event`.
 
 - **3. Reporter – Executive report**
@@ -77,7 +78,7 @@ The engine runs in three stages, all driven by configuration in `src/config.py` 
 
 - **Language**: Python 3.9+  
 - **LLM**: Google Gemini 2.5 Flash  
-- **Embeddings**: `gemini-embedding-001` via the Gemini API  
+- **Embeddings for dedupe**: local `sentence-transformers` model (default `all-mpnet-base-v2`) stored in `pgvector`  
 - **Database**: Supabase (PostgreSQL + `pgvector`)  
 - **UI**: Streamlit dashboard (`src/app.py`)  
 - **Automation**: GitHub Actions + external cron (or any scheduler)  

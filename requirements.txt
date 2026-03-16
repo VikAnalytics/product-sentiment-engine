@@ -6,3 +6,4 @@ spacy
 supabase
 streamlit
 streamlit-searchbox
+sentence-transformers

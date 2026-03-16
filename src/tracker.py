@@ -10,6 +10,7 @@ from typing import Optional
 import requests
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
+from sentence_transformers import SentenceTransformer
 
 # Allow importing config when running as python src/tracker.py from repo root
 _src_dir = os.path.dirname(os.path.abspath(__file__))
@@ -64,6 +65,10 @@ def _configure_logging() -> None:
 
 # Max extra words from description to add to search query (keeps API queries focused)
 SEARCH_CONTEXT_WORDS = 5
+
+# Local embedding model (used instead of Gemini for semantic dedupe)
+_EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "all-mpnet-base-v2")
+_embed_model: Optional[SentenceTransformer] = None
 
 
 def _search_query_from_context(name: str, target_type: str, description: str) -> str:
@@ -143,30 +148,17 @@ def search_reddit(query: str) -> str:
 
 
 def get_embedding(text: str) -> list:
-    """Converts text into an embedding vector. Raises on API or format error.
+    """Converts text into an embedding vector using a local model (no external API).
 
-    Uses the newer google.genai client instead of the deprecated google.generativeai.embed_content.
+    Uses a SentenceTransformer model (`all-mpnet-base-v2` by default, 768-dim) so it
+    remains compatible with the existing `vector(768)` column in Supabase.
     """
-    from google import genai
-
-    model_name = get_embedding_model_name()
-    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-    result = client.models.embed_content(
-        model=model_name,
-        contents=text,
-    )
-    # result.embeddings is typically a list with one embedding when contents is a single string
-    embeddings = getattr(result, "embeddings", None)
-    if not embeddings:
-        raise ValueError("Embedding API did not return embeddings")
-    first = embeddings[0]
-    # Handle either plain list or object with 'values' attribute
-    if isinstance(first, (list, tuple)):
-        return list(first)
-    values = getattr(first, "values", None)
-    if values is None:
-        raise ValueError("Embedding object missing 'values'")
-    return list(values)
+    global _embed_model
+    if _embed_model is None:
+        logger.info("Loading local embedding model: %s", _EMBED_MODEL_NAME)
+        _embed_model = SentenceTransformer(_EMBED_MODEL_NAME)
+    vec = _embed_model.encode(text, normalize_embeddings=False)
+    return vec.tolist()
 
 
 def _parse_ai_sentiment_line(line: str) -> Optional[dict]:
@@ -328,11 +320,36 @@ def run_tracker() -> None:
                     }
                     if event_id is not None:
                         insert_row["event_id"] = event_id
-                    if DRY_RUN:
-                        logger.info("   💾 [DRY RUN] Would save net-new intelligence for %s [%s]", name, headline[:50])
+                    # Text-exact guard: if we already have an identical pros/cons/quotes triple
+                    # for this target/event, skip inserting (regardless of date).
+                    dup_query = (
+                        supabase.table("sentiment")
+                        .select("id")
+                        .eq("target_id", t_id)
+                        .eq("pros", insert_row["pros"])
+                        .eq("cons", insert_row["cons"])
+                        .eq("verbatim_quotes", insert_row["verbatim_quotes"])
+                    )
+                    if event_id is not None:
+                        dup_query = dup_query.eq("event_id", event_id)
+                    dup_resp = dup_query.execute()
+                    dup_data = getattr(dup_resp, "data", None) or []
+                    if dup_data:
+                        logger.info(
+                            "   ↩️ Identical sentiment already exists for %s [%s]. Skipping insert.",
+                            name,
+                            headline[:50],
+                        )
                     else:
-                        supabase.table("sentiment").insert(insert_row).execute()
-                        logger.info("   💾 SAVED NET-NEW INTELLIGENCE: %s [%s]", name, headline[:50])
+                        if DRY_RUN:
+                            logger.info(
+                                "   💾 [DRY RUN] Would save net-new intelligence for %s [%s]",
+                                name,
+                                headline[:50],
+                            )
+                        else:
+                            supabase.table("sentiment").insert(insert_row).execute()
+                            logger.info("   💾 SAVED NET-NEW INTELLIGENCE: %s [%s]", name, headline[:50])
                 else:
                     logger.warning("   ⚠️ AI output format error for %s.", name)
             except Exception as e:

@@ -54,4 +54,5 @@ jobs:
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git add reports/
           git commit -m "Auto-generated daily market report" || echo "No changes to commit"
+          git pull --rebase origin main
           git push

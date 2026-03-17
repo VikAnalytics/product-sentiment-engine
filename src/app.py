@@ -438,7 +438,7 @@ def fetch_targets():
     """Fetch all targets for sidebar (id, name, type, parent). Selected target details from fetch_target_by_id."""
     supabase = get_supabase()
     resp = supabase.table("targets").select(
-        "id, name, target_type, status, parent_target_id"
+        "id, name, target_type, status, parent_target_id, logo_url, domain"
     ).execute()
     return getattr(resp, "data", None) or []
 

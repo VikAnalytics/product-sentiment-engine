@@ -1098,70 +1098,105 @@ def _avg_score(score_rows: list) -> Optional[float]:
 
 
 def render_target_compare_card(target: dict, score_rows: list, sentiment_rows: list) -> None:
-    """Render a compact comparison card for one target: score, momentum, top pros/cons."""
+    """Render a compact comparison card: inline logo, big score, sparkline, top pros/cons."""
     name = target.get("name") or "Unknown"
     ttype = (target.get("target_type") or "").upper()
     logo_url = _target_logo_url(target)
     domain = target.get("domain") or (_domain_from_logo_url(logo_url) if logo_url else None)
     logo_bytes = _get_logo_bytes(logo_url, domain)
 
-    # Header: logo + name
-    col_logo, col_title = st.columns([0.2, 0.8])
-    with col_logo:
-        if logo_bytes:
-            st.image(logo_bytes, width=48)
-        else:
-            initial = (name[0].upper() if name else "?")
-            st.markdown(
-                f'<span style="width:48px;height:48px;border-radius:8px;background:#0d9488;color:#fff;'
-                f'font-size:20px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;">'
-                f'{initial}</span>',
-                unsafe_allow_html=True,
-            )
-    with col_title:
-        st.markdown(f"**{name}**")
-        st.caption(ttype)
-
-    # Score + momentum
-    avg = _avg_score(score_rows)
-    if avg is not None:
-        _render_score_badge(avg)
+    # ── Header: inline logo + name (flat HTML, no st.columns) ─────
+    if logo_bytes:
+        data_url = _logo_data_url(logo_bytes)
+        logo_html = (
+            f'<img src="{data_url}" width="44" height="44" '
+            f'style="border-radius:10px;object-fit:contain;flex-shrink:0;" />'
+        )
     else:
-        st.caption("_No score data yet_")
-    momentum = _compute_momentum(score_rows)
-    if momentum is not None:
-        st.markdown("")
-        _render_momentum_badge(momentum)
-    st.markdown("")
+        initial = (name[0].upper() if name else "?")
+        logo_html = (
+            f'<div style="width:44px;height:44px;border-radius:10px;'
+            f'background:linear-gradient(135deg,#0071E3,#0055B3);color:#fff;'
+            f'font-size:18px;font-weight:700;display:inline-flex;'
+            f'align-items:center;justify-content:center;flex-shrink:0;">'
+            f'{_he(initial)}</div>'
+        )
+    type_span = f'<span style="font-size:0.68rem;font-weight:700;color:#86868B;letter-spacing:0.08em;text-transform:uppercase;">{_he(ttype)}</span>'
+    name_div = f'<div style="font-size:1rem;font-weight:700;color:#1D1D1F;line-height:1.2;">{_he(name)}</div>'
+    name_block = f'<div style="flex:1;min-width:0;">{type_span}{name_div}</div>'
+    st.markdown(
+        f'<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">{logo_html}{name_block}</div>',
+        unsafe_allow_html=True,
+    )
 
-    # 30-day sparkline
+    # ── Big score display ──────────────────────────────────────────
+    avg = _avg_score(score_rows)
+    momentum = _compute_momentum(score_rows)
+    if avg is not None:
+        color = _score_color(avg)
+        sign = "+" if avg > 0 else ""
+        label = _score_label(avg)
+        m_html = ""
+        if momentum is not None:
+            if momentum > 0:
+                mc, ma, ml = "#16a34a", "↑", f"+{momentum}"
+            elif momentum < 0:
+                mc, ma, ml = "#dc2626", "↓", str(momentum)
+            else:
+                mc, ma, ml = "#6b7280", "→", "0"
+            m_html = (
+                f'<span style="font-size:0.78rem;font-weight:600;color:{mc};margin-left:6px;">'
+                f'{ma} {ml} vs last 7d</span>'
+            )
+        st.markdown(
+            f'<div style="text-align:center;padding:16px 0 12px 0;">'
+            f'<div style="font-size:3.2rem;font-weight:800;color:{color};letter-spacing:-0.04em;line-height:1;">{sign}{avg}</div>'
+            f'<div style="font-size:0.75rem;color:#86868B;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;margin-top:4px;">{_he(label)}{m_html}</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<div style="text-align:center;padding:20px 0;color:#86868B;font-size:0.875rem;">No score data yet</div>',
+            unsafe_allow_html=True,
+        )
+
+    # ── 30-day sparkline ──────────────────────────────────────────
     if score_rows:
         try:
             df_spark = _build_score_timeseries(score_rows, 30)
             if not df_spark.empty:
                 df_spark["date"] = pd.to_datetime(df_spark["date"])
                 df_spark = df_spark.set_index("date")[["rolling_avg"]]
-                st.line_chart(df_spark, height=80, use_container_width=True)
-                st.caption("30-day trend (7-day avg)")
+                st.line_chart(df_spark, height=72, use_container_width=True)
+                st.caption("30-day trend · 7-day avg")
         except Exception:
             pass
 
-    # Top pros / cons from recent sentiment
+    # ── Top pros / cons compact grid ──────────────────────────────
     meaningful = filter_meaningful_sentiment(sentiment_rows)
     if meaningful:
         agg = aggregate_sentiment(meaningful)
-        st.markdown("**Top Pros**")
-        for line in (agg["pros"] or [])[:3]:
-            st.markdown(f"- {line}")
-        if not agg["pros"]:
-            st.caption("_None recorded_")
-        st.markdown("**Top Cons**")
-        for line in (agg["cons"] or [])[:3]:
-            st.markdown(f"- {line}")
-        if not agg["cons"]:
-            st.caption("_None recorded_")
+
+        def _mini_bullets(lines, n=3):
+            if not lines:
+                return '<span class="pcc-empty">None recorded.</span>'
+            return "".join(
+                f'<div class="pcc-item"><span class="pcc-item-dot">·</span>{_he(l)}</div>'
+                for l in lines[:n]
+            )
+
+        pros_col = f'<div><div class="pcc-label">Pros</div>{_mini_bullets(agg["pros"])}</div>'
+        cons_col = f'<div><div class="pcc-label">Cons</div>{_mini_bullets(agg["cons"])}</div>'
+        st.markdown(
+            f'<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:8px;">{pros_col}{cons_col}</div>',
+            unsafe_allow_html=True,
+        )
     else:
-        st.caption("_No sentiment data yet_")
+        st.markdown(
+            '<div style="text-align:center;color:#86868B;font-size:0.875rem;padding:12px 0;">No sentiment data yet</div>',
+            unsafe_allow_html=True,
+        )
 
 
 # -----------------------------------------------------------------------------

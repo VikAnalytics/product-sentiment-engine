@@ -937,20 +937,22 @@ def render_target_overview(target: dict, score_rows: Optional[list] = None) -> N
     type_html = f'<span class="hero-type">{_he(target_type)}</span>' if target_type else ""
     desc_html = f'<div class="hero-desc">{_he(description)}</div>' if description else ""
 
+    # Build as a single flat string — Streamlit's markdown parser mis-renders
+    # multiline HTML by treating newline-separated closing tags as literal text.
+    inner = (
+        f'<div style="flex:1;min-width:0;">'
+        f'{type_html}'
+        f'<div class="hero-name">{_he(name)}</div>'
+        f'{badge_html}'
+        f'</div>'
+    )
+    row = (
+        f'<div style="display:flex;align-items:flex-start;gap:20px;">'
+        f'{logo_html}{inner}'
+        f'</div>'
+    )
     st.markdown(
-        f"""
-        <div class="hero-card">
-          <div style="display:flex;align-items:flex-start;gap:20px;">
-            {logo_html}
-            <div style="flex:1;min-width:0;">
-              {type_html}
-              <div class="hero-name">{_he(name)}</div>
-              {badge_html}
-            </div>
-          </div>
-          {desc_html}
-        </div>
-        """,
+        f'<div class="hero-card">{row}{desc_html}</div>',
         unsafe_allow_html=True,
     )
 
@@ -1048,23 +1050,11 @@ def render_event_card(event: dict, sentiments: list) -> None:
                 parts.append(f'<div class="pcc-quote">{_he(quote)}{link}</div>')
             return "".join(parts)
 
+        pros_col = f'<div><div class="pcc-label">Pros</div>{_build_bullets(agg["pros"])}</div>'
+        cons_col = f'<div><div class="pcc-label">Cons</div>{_build_bullets(agg["cons"])}</div>'
+        voice_col = f'<div><div class="pcc-label">Voice of the Customer</div>{_build_quotes(agg["voice"])}</div>'
         st.markdown(
-            f"""
-            <div class="pcc-grid">
-              <div>
-                <div class="pcc-label">Pros</div>
-                {_build_bullets(agg["pros"])}
-              </div>
-              <div>
-                <div class="pcc-label">Cons</div>
-                {_build_bullets(agg["cons"])}
-              </div>
-              <div>
-                <div class="pcc-label">Voice of the Customer</div>
-                {_build_quotes(agg["voice"])}
-              </div>
-            </div>
-            """,
+            f'<div class="pcc-grid">{pros_col}{cons_col}{voice_col}</div>',
             unsafe_allow_html=True,
         )
 

@@ -13,6 +13,7 @@ if _src_dir not in sys.path:
     sys.path.insert(0, _src_dir)
 
 from config import get_supabase, get_model, LOOKBACK_DAYS, MAX_PAYLOAD_CHARS_PER_FIELD
+from sentiment_dedupe import normalize_for_dedupe
 
 logger = logging.getLogger(__name__)
 
@@ -219,22 +220,13 @@ def save_report(report_content: str) -> str:
     return file_path
 
 
-def _normalize_for_lookup(s: str) -> str:
-    """Normalize for matching: lowercase, collapse whitespace, remove punctuation."""
-    if not s:
-        return ""
-    s = (s or "").strip().lower()
-    s = re.sub(r"[^\w\s]", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
 
 def _build_event_lookup(supabase):
     """Build normalized (target_name, headline) -> event_id; norm_target -> [event_id]; norm_target -> target_id."""
     targets_resp = supabase.table("targets").select("id, name").execute()
     targets_list = getattr(targets_resp, "data", None) or []
     targets = {t["id"]: (t.get("name") or "").strip() for t in targets_list}
-    name_to_target_id = {_normalize_for_lookup(t.get("name") or ""): t["id"] for t in targets_list if t.get("id")}
+    name_to_target_id = {normalize_for_dedupe(t.get("name") or ""): t["id"] for t in targets_list if t.get("id")}
     events_resp = supabase.table("events").select("id, target_id, headline").execute()
     events = getattr(events_resp, "data", None) or []
     lookup = {}
@@ -243,9 +235,9 @@ def _build_event_lookup(supabase):
         t_name = targets.get(e.get("target_id"), "").strip()
         headline = (e.get("headline") or "").strip()
         if t_name and e.get("id"):
-            key = (_normalize_for_lookup(t_name), _normalize_for_lookup(headline))
+            key = (normalize_for_dedupe(t_name), normalize_for_dedupe(headline))
             lookup[key] = e["id"]
-            nt = _normalize_for_lookup(t_name)
+            nt = normalize_for_dedupe(t_name)
             by_target.setdefault(nt, []).append(e["id"])
     return lookup, by_target, name_to_target_id
 
@@ -275,7 +267,7 @@ def parse_report_and_store_analyses(report_content: str) -> int:
         analysis_text = (am.group(1) or "").strip()
         if not analysis_text:
             continue
-        key = (_normalize_for_lookup(target_name), _normalize_for_lookup(headline))
+        key = (normalize_for_dedupe(target_name), normalize_for_dedupe(headline))
         event_id = lookup.get(key)
         if not event_id and key[0]:
             candidates = by_target.get(key[0], [])

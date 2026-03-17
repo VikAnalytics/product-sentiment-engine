@@ -85,9 +85,3 @@ def get_json_model():
             response_mime_type="application/json",
         ),
     )
-
-
-def get_embedding_model_name() -> str:
-    """Return the embedding model identifier."""
-    _configure_genai()
-    return EMBEDDING_MODEL

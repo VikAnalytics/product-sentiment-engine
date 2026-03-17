@@ -737,7 +737,7 @@ def aggregate_sentiment(sentiments: list) -> dict:
             seen_quote_key.add(key)
             voice_deduped.append((quote, url))
     # Pros/cons: use AI to keep only distinct differentiators when Gemini is configured
-    if os.getenv("GEMINI_API_KEY") and consolidate_bullet_points_with_ai:
+    if os.getenv("OPENAI_API_KEY") and consolidate_bullet_points_with_ai:
         try:
             pros_out = consolidate_bullet_points_with_ai(all_pros, "pros")
             cons_out = consolidate_bullet_points_with_ai(all_cons, "cons")

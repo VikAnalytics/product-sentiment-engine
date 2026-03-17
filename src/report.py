@@ -86,7 +86,7 @@ def get_cloud_data():
 
             sentiment_q = (
                 supabase.table("sentiment")
-                .select("*")
+                .select("id, target_id, event_id, pros, cons, verbatim_quotes, source_url, created_at, sentiment_score")
                 .eq("target_id", t_id)
                 .gte("created_at", yesterday_str)
             )
@@ -122,6 +122,10 @@ def get_cloud_data():
             all_cons = _dedupe_sentences(raw_cons)
             all_quotes = raw_quotes
 
+            # Compute average sentiment score for this event (skip nulls from old rows)
+            scores = [s.get("sentiment_score") for s in sentiments if s.get("sentiment_score") is not None]
+            avg_score = round(sum(scores) / len(scores)) if scores else None
+
             if all_pros or all_cons or all_quotes:
                 full_data.append({
                     "name": t_name,
@@ -131,6 +135,7 @@ def get_cloud_data():
                     "cons": all_cons,
                     "quotes": all_quotes,
                     "event_id": event_id,
+                    "sentiment_score": avg_score,
                 })
 
     return full_data
@@ -145,9 +150,12 @@ def generate_batch_report(data):
         pros = _truncate(item.get("pros", ""), max_chars)
         cons = _truncate(item.get("cons", ""), max_chars)
         quotes = _truncate(item.get("quotes", ""), max_chars)
+        score = item.get("sentiment_score")
+        score_str = f"SENTIMENT SCORE: {score:+d}/10\n" if score is not None else ""
         # Each item is one (target, event); description is the event headline
         payload_lines.append(
             f"[{item.get('type', '')}] {item.get('name', '')} | Event: {item.get('description', '')}\n"
+            f"{score_str}"
             f"PROS: {pros}\n"
             f"CONS: {cons}\n"
             f"VOICE OF CUSTOMER: {quotes}\n"
@@ -174,6 +182,7 @@ def generate_batch_report(data):
     ## 🎯 Target Deep Dives
     (For EVERY item provided, create a sub-section. Each item is a target + event (the headline we tracked). Use the section heading: ### [Target Name] - Event: [event headline]. So readers see which event caused which sentiment.)
     ### [Target Name] - Event: [event headline]
+    * **Sentiment Score:** (If a SENTIMENT SCORE is provided, repeat it here and interpret what it means strategically, e.g. "Score: +6/10 — Strong positive reception.")
     * **Strategic Analysis:** (Your expert synthesis for this specific event.)
     * **Voice of the Customer:** (Present the provided verbatim user quotes as bulleted blockquotes. YOU MUST KEEP THE [View Source](URL) MARKDOWN LINK INTACT AT THE END OF THE QUOTE.)
 

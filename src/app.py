@@ -8,7 +8,6 @@ Or with explicit Python path:
   PYTHONPATH=src streamlit run src/app.py
 """
 import os
-import re
 import sys
 
 # Ensure src is on path so "from config import ..." works when run as streamlit run src/app.py
@@ -17,7 +16,8 @@ if _src_dir not in sys.path:
     sys.path.insert(0, _src_dir)
 
 import streamlit as st
-from datetime import datetime
+import pandas as pd
+from datetime import datetime, timedelta
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -83,6 +83,159 @@ def _inject_custom_css() -> None:
 
 
 # -----------------------------------------------------------------------------
+# Sentiment score helpers
+# -----------------------------------------------------------------------------
+def _score_color(score: int) -> str:
+    """Map score (-10..+10) to a hex color."""
+    if score >= 7:
+        return "#16a34a"   # green-600
+    if score >= 3:
+        return "#65a30d"   # lime-600
+    if score >= -2:
+        return "#6b7280"   # gray-500
+    if score >= -6:
+        return "#ea580c"   # orange-600
+    return "#dc2626"       # red-600
+
+
+def _score_label(score: int) -> str:
+    if score >= 7:
+        return "Very Positive"
+    if score >= 3:
+        return "Positive"
+    if score >= -2:
+        return "Neutral"
+    if score >= -6:
+        return "Negative"
+    return "Very Negative"
+
+
+def _render_score_badge(score: Optional[int]) -> None:
+    """Render a colored score pill: e.g. ▲ +6 Positive"""
+    if score is None:
+        return
+    color = _score_color(score)
+    arrow = "▲" if score > 0 else ("▼" if score < 0 else "●")
+    label = _score_label(score)
+    sign = "+" if score > 0 else ""
+    st.markdown(
+        f'<span style="background:{color};color:#fff;padding:2px 10px;border-radius:12px;font-size:0.78rem;font-weight:600;">'
+        f'{arrow} {sign}{score} {label}</span>',
+        unsafe_allow_html=True,
+    )
+
+
+def _compute_momentum(score_rows: list) -> Optional[float]:
+    """
+    Given sorted (created_at, sentiment_score) rows, return the delta:
+    avg score of the last 7 days minus avg score of the 7 days before that.
+    Returns None if insufficient data.
+    """
+    from datetime import timezone
+    now = datetime.now(timezone.utc)
+    cutoff_recent = now - timedelta(days=7)
+    cutoff_prev = now - timedelta(days=14)
+
+    recent, prev = [], []
+    for row in score_rows:
+        s = row.get("sentiment_score")
+        if s is None:
+            continue
+        raw = row.get("created_at") or ""
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if dt >= cutoff_recent:
+            recent.append(s)
+        elif dt >= cutoff_prev:
+            prev.append(s)
+
+    if not recent:
+        return None
+    avg_recent = sum(recent) / len(recent)
+    if not prev:
+        return None
+    avg_prev = sum(prev) / len(prev)
+    return round(avg_recent - avg_prev, 1)
+
+
+_TAG_META = {
+    "threat":      {"emoji": "🔴", "label": "Threat",      "color": "#dc2626"},
+    "opportunity": {"emoji": "🟢", "label": "Opportunity", "color": "#16a34a"},
+    "monitor":     {"emoji": "🟡", "label": "Monitor",     "color": "#ca8a04"},
+    "no_action":   {"emoji": "⚪", "label": "No Action",   "color": "#6b7280"},
+}
+
+# Priority for resolving the dominant tag across multiple sentiment rows
+_TAG_PRIORITY = {"threat": 0, "opportunity": 1, "monitor": 2, "no_action": 3}
+
+
+def _dominant_tag(sentiments: list) -> Optional[str]:
+    """Return the highest-priority implication_tag across all sentiment rows, or None."""
+    tags = [s.get("implication_tag") for s in sentiments if s.get("implication_tag")]
+    if not tags:
+        return None
+    return min(tags, key=lambda t: _TAG_PRIORITY.get(t, 99))
+
+
+_SOURCE_LABELS = {
+    "hn": "HN",
+    "reddit": "Reddit",
+    "stackoverflow": "Stack Overflow",
+    "google_news": "Financial News",
+}
+
+
+def _format_source_type(source_types: list) -> str:
+    """Given a list of source_type strings from sentiment rows, return a human-readable sources line."""
+    seen: set = set()
+    for st in source_types:
+        if not st:
+            continue
+        for part in st.split("|"):
+            p = part.strip()
+            if p:
+                seen.add(p)
+    if not seen:
+        return ""
+    labels = [_SOURCE_LABELS.get(s, s.replace("_", " ").title()) for s in sorted(seen)]
+    return ", ".join(labels)
+
+
+def _render_tag_badge(tag: Optional[str]) -> None:
+    """Render a colored implication tag pill: e.g. 🔴 Threat"""
+    if not tag or tag not in _TAG_META:
+        return
+    meta = _TAG_META[tag]
+    st.markdown(
+        f'<span style="background:{meta["color"]};color:#fff;padding:2px 10px;border-radius:12px;'
+        f'font-size:0.78rem;font-weight:600;">{meta["emoji"]} {meta["label"]}</span>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_momentum_badge(momentum: Optional[float]) -> None:
+    """Render a momentum indicator: e.g. ↑ +2.3 vs last week"""
+    if momentum is None:
+        return
+    if momentum > 0:
+        color, arrow = "#16a34a", "↑"
+        label = f"+{momentum} vs last 7 days"
+    elif momentum < 0:
+        color, arrow = "#dc2626", "↓"
+        label = f"{momentum} vs last 7 days"
+    else:
+        color, arrow = "#6b7280", "→"
+        label = "Stable vs last 7 days"
+    st.markdown(
+        f'<span style="background:{color};color:#fff;padding:2px 10px;border-radius:12px;font-size:0.78rem;font-weight:600;">'
+        f'{arrow} {label}</span>',
+        unsafe_allow_html=True,
+    )
+
+
+# -----------------------------------------------------------------------------
 # Data fetching
 # -----------------------------------------------------------------------------
 def fetch_targets():
@@ -94,7 +247,7 @@ def fetch_targets():
     return getattr(resp, "data", None) or []
 
 
-def fetch_target_by_id(target_id: int):
+def fetch_target_by_id(target_id: Optional[int]):
     """Fetch a single target by id; returns dict or None (includes logo_url)."""
     if target_id is None:
         return None
@@ -192,7 +345,7 @@ def _get_logo_bytes(logo_url: Optional[str], domain: Optional[str]) -> Optional[
     return None
 
 
-def fetch_events_for_target(target_id: int):
+def fetch_events_for_target(target_id: Optional[int]):
     """Fetch events for target, ordered by created_at descending."""
     if target_id is None:
         return []
@@ -207,28 +360,28 @@ def fetch_events_for_target(target_id: int):
     return getattr(resp, "data", None) or []
 
 
-def fetch_sentiment_for_event(event_id: int):
+def fetch_sentiment_for_event(event_id: Optional[int]):
     """Fetch all sentiment rows for an event (where event_id matches)."""
     if event_id is None:
         return []
     supabase = get_supabase()
     resp = (
         supabase.table("sentiment")
-        .select("id, target_id, event_id, pros, cons, verbatim_quotes, source_url, created_at")
+        .select("id, target_id, event_id, pros, cons, verbatim_quotes, source_url, created_at, sentiment_score, implication_tag, source_type")
         .eq("event_id", event_id)
         .execute()
     )
     return getattr(resp, "data", None) or []
 
 
-def fetch_sentiment_for_target_ungrouped(target_id: int):
+def fetch_sentiment_for_target_ungrouped(target_id: Optional[int]):
     """Fetch sentiment rows for this target with no event (legacy or general target-level)."""
     if target_id is None:
         return []
     supabase = get_supabase()
     resp = (
         supabase.table("sentiment")
-        .select("id, target_id, event_id, pros, cons, verbatim_quotes, source_url, created_at")
+        .select("id, target_id, event_id, pros, cons, verbatim_quotes, source_url, created_at, sentiment_score, implication_tag, source_type")
         .eq("target_id", target_id)
         .is_("event_id", None)
         .execute()
@@ -236,7 +389,71 @@ def fetch_sentiment_for_target_ungrouped(target_id: int):
     return getattr(resp, "data", None) or []
 
 
-def fetch_target_sentiment_summary(target_id: int):
+def fetch_all_sentiment_scores_for_target(target_id: Optional[int]) -> list:
+    """Fetch all (created_at, sentiment_score) rows for a target to compute momentum."""
+    if target_id is None:
+        return []
+    supabase = get_supabase()
+    resp = (
+        supabase.table("sentiment")
+        .select("created_at, sentiment_score")
+        .eq("target_id", target_id)
+        .not_.is_("sentiment_score", None)
+        .order("created_at", desc=False)
+        .execute()
+    )
+    return getattr(resp, "data", None) or []
+
+
+def fetch_all_scores_batch() -> dict:
+    """One-shot fetch of all (target_id, sentiment_score, created_at) rows. Returns dict: target_id -> [rows]."""
+    supabase = get_supabase()
+    resp = (
+        supabase.table("sentiment")
+        .select("target_id, sentiment_score, created_at")
+        .not_.is_("sentiment_score", None)
+        .order("created_at", desc=False)
+        .execute()
+    )
+    rows = getattr(resp, "data", None) or []
+    by_target: dict = {}
+    for r in rows:
+        tid = r.get("target_id")
+        if tid:
+            by_target.setdefault(tid, []).append(r)
+    return by_target
+
+
+def fetch_event_count_by_target() -> dict:
+    """Returns dict: target_id -> event count."""
+    supabase = get_supabase()
+    resp = supabase.table("events").select("target_id").execute()
+    rows = getattr(resp, "data", None) or []
+    counts: dict = {}
+    for r in rows:
+        tid = r.get("target_id")
+        if tid:
+            counts[tid] = counts.get(tid, 0) + 1
+    return counts
+
+
+def fetch_recent_sentiment_for_target(target_id: Optional[int], limit: int = 5) -> list:
+    """Fetch the most recent sentiment rows for a target (all events), for use in comparison cards."""
+    if target_id is None:
+        return []
+    supabase = get_supabase()
+    resp = (
+        supabase.table("sentiment")
+        .select("pros, cons, verbatim_quotes, source_url, sentiment_score, created_at")
+        .eq("target_id", target_id)
+        .order("created_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return getattr(resp, "data", None) or []
+
+
+def fetch_target_sentiment_summary(target_id: Optional[int]):
     """Fetch the AI-consolidated pros/cons for this target (one row per target). Returns dict or None."""
     if target_id is None:
         return None
@@ -340,29 +557,6 @@ def aggregate_sentiment(sentiments: list) -> dict:
         "voice": voice_deduped,
     }
 
-
-# -----------------------------------------------------------------------------
-# Insight text parsing (multi-line / bullet-friendly) — uses sentiment_dedupe.to_bullet_lines
-# -----------------------------------------------------------------------------
-def _render_insight_block(
-    label: str,
-    text: str,
-    empty_placeholder: str = "_No items recorded._",
-    as_blockquote: bool = False,
-) -> None:
-    """Render a section (Pros/Cons/VoC) with bullet list or blockquotes."""
-    st.markdown(f"**{label}**")
-    st.markdown("---")
-    lines = _to_bullet_lines(text)
-    if not lines:
-        st.caption(empty_placeholder)
-        return
-    for line in lines:
-        if as_blockquote:
-            st.markdown(f"> {line}")
-        else:
-            st.markdown(f"- {line}")
-    st.markdown("")
 
 
 # -----------------------------------------------------------------------------
@@ -491,8 +685,8 @@ def render_sidebar(targets: list, selected_target_id: Optional[int]) -> Optional
 # -----------------------------------------------------------------------------
 # Main: target overview (hero with logo/initial + description)
 # -----------------------------------------------------------------------------
-def render_target_overview(target: dict) -> None:
-    """Render target as a hero card: logo or initial, name, description."""
+def render_target_overview(target: dict, score_rows: Optional[list] = None) -> None:
+    """Render target as a hero card: logo or initial, name, description, score momentum."""
     if not target:
         return
     name = target.get("name") or "Unnamed Target"
@@ -511,6 +705,16 @@ def render_target_overview(target: dict) -> None:
             st.markdown(f'<span class="hero-initial">{initial}</span>', unsafe_allow_html=True)
     with col_name:
         st.markdown(f"## {name}")
+        # Show current avg score + momentum if we have score data
+        if score_rows:
+            recent_scores = [r.get("sentiment_score") for r in score_rows[-10:] if r.get("sentiment_score") is not None]
+            if recent_scores:
+                avg = round(sum(recent_scores) / len(recent_scores))
+                _render_score_badge(avg)
+                st.markdown("")
+            momentum = _compute_momentum(score_rows)
+            if momentum is not None:
+                _render_momentum_badge(momentum)
     if description:
         desc_escaped = description.replace("<", "&lt;").replace(">", "&gt;")
         st.markdown(f'<p style="margin-top:0.5rem; margin-bottom:1rem; color:#374151; line-height:1.6;">{desc_escaped}</p>', unsafe_allow_html=True)
@@ -555,7 +759,10 @@ def render_event_card(event: dict, sentiments: list) -> None:
     else:
         date_str = ""
 
-    label = f"{headline} — {date_str}" if date_str else headline
+    # Compute tag before rendering so we can prefix the expander label
+    tag = _dominant_tag(sentiments)
+    tag_prefix = f"{_TAG_META[tag]['emoji']} " if tag and tag in _TAG_META else ""
+    label = f"{tag_prefix}{headline} — {date_str}" if date_str else f"{tag_prefix}{headline}"
 
     with st.expander(label, expanded=True):
         if not sentiments:
@@ -568,6 +775,22 @@ def render_event_card(event: dict, sentiments: list) -> None:
         # One consolidated view: merge all sources and dedupe so we don't repeat the same points
         agg = aggregate_sentiment(sentiments)
         sources = list({(s.get("source_url") or "").strip() for s in sentiments if (s.get("source_url") or "").strip()})
+
+        # Score + implication tag + source badges
+        scores = [s.get("sentiment_score") for s in sentiments if s.get("sentiment_score") is not None]
+        avg_score = round(sum(scores) / len(scores)) if scores else None
+        source_label = _format_source_type([s.get("source_type") for s in sentiments])
+        badge_cols = st.columns([0.22, 0.22, 0.56])
+        with badge_cols[0]:
+            if avg_score is not None:
+                _render_score_badge(avg_score)
+        with badge_cols[1]:
+            if tag:
+                _render_tag_badge(tag)
+        with badge_cols[2]:
+            if source_label:
+                st.caption(f"Sources: {source_label}")
+        st.markdown("")
 
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -632,6 +855,363 @@ def render_timeline(events: list, get_sentiment_fn) -> None:
 
 
 # -----------------------------------------------------------------------------
+# P2: Competitive comparison helpers
+# -----------------------------------------------------------------------------
+def _avg_score(score_rows: list) -> Optional[float]:
+    """Return rounded average sentiment score or None if no data."""
+    scores = [r.get("sentiment_score") for r in score_rows if r.get("sentiment_score") is not None]
+    return round(sum(scores) / len(scores)) if scores else None
+
+
+def render_target_compare_card(target: dict, score_rows: list, sentiment_rows: list) -> None:
+    """Render a compact comparison card for one target: score, momentum, top pros/cons."""
+    name = target.get("name") or "Unknown"
+    ttype = (target.get("target_type") or "").upper()
+    logo_url = _target_logo_url(target)
+    domain = target.get("domain") or (_domain_from_logo_url(logo_url) if logo_url else None)
+    logo_bytes = _get_logo_bytes(logo_url, domain)
+
+    # Header: logo + name
+    col_logo, col_title = st.columns([0.2, 0.8])
+    with col_logo:
+        if logo_bytes:
+            st.image(logo_bytes, width=48)
+        else:
+            initial = (name[0].upper() if name else "?")
+            st.markdown(
+                f'<span style="width:48px;height:48px;border-radius:8px;background:#0d9488;color:#fff;'
+                f'font-size:20px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;">'
+                f'{initial}</span>',
+                unsafe_allow_html=True,
+            )
+    with col_title:
+        st.markdown(f"**{name}**")
+        st.caption(ttype)
+
+    # Score + momentum
+    avg = _avg_score(score_rows)
+    if avg is not None:
+        _render_score_badge(avg)
+    else:
+        st.caption("_No score data yet_")
+    momentum = _compute_momentum(score_rows)
+    if momentum is not None:
+        st.markdown("")
+        _render_momentum_badge(momentum)
+    st.markdown("")
+
+    # 30-day sparkline
+    if score_rows:
+        try:
+            df_spark = _build_score_timeseries(score_rows, 30)
+            if not df_spark.empty:
+                df_spark["date"] = pd.to_datetime(df_spark["date"])
+                df_spark = df_spark.set_index("date")[["rolling_avg"]]
+                st.line_chart(df_spark, height=80, use_container_width=True)
+                st.caption("30-day trend (7-day avg)")
+        except Exception:
+            pass
+
+    # Top pros / cons from recent sentiment
+    meaningful = filter_meaningful_sentiment(sentiment_rows)
+    if meaningful:
+        agg = aggregate_sentiment(meaningful)
+        st.markdown("**Top Pros**")
+        for line in (agg["pros"] or [])[:3]:
+            st.markdown(f"- {line}")
+        if not agg["pros"]:
+            st.caption("_None recorded_")
+        st.markdown("**Top Cons**")
+        for line in (agg["cons"] or [])[:3]:
+            st.markdown(f"- {line}")
+        if not agg["cons"]:
+            st.caption("_None recorded_")
+    else:
+        st.caption("_No sentiment data yet_")
+
+
+# -----------------------------------------------------------------------------
+# P5: Trend charts (30/90 day sentiment timeline)
+# -----------------------------------------------------------------------------
+def _build_score_timeseries(score_rows: list, lookback_days: int) -> "pd.DataFrame":
+    """
+    Aggregate score rows into daily avg scores within the lookback window.
+    Returns a pandas DataFrame with columns: date, score, rolling_avg.
+    """
+    from datetime import timezone
+
+    if not score_rows:
+        return pd.DataFrame(columns=["date", "score", "rolling_avg"])
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+    rows = []
+    for r in score_rows:
+        s = r.get("sentiment_score")
+        if s is None:
+            continue
+        raw = r.get("created_at") or ""
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if dt < cutoff:
+            continue
+        rows.append({"date": dt.date(), "score": s})
+
+    if not rows:
+        return pd.DataFrame(columns=["date", "score", "rolling_avg"])
+
+    df = pd.DataFrame(rows)
+    daily = df.groupby("date")["score"].mean().reset_index()
+    daily = daily.sort_values("date")
+    daily["rolling_avg"] = daily["score"].rolling(window=7, min_periods=1).mean().round(1)
+    daily["score"] = daily["score"].round(1)
+    return daily
+
+
+def render_trend_chart(score_rows: list, target_name: str) -> None:
+    """Render interactive sentiment trend chart with 30/90/All-time window toggle."""
+    try:
+        import altair as alt
+    except ImportError:
+        st.caption("_Chart library not available (altair required)._")
+        return
+
+    if not score_rows:
+        st.caption("_No score data yet — trend chart will appear after the tracker runs._")
+        return
+
+    window_label = st.radio(
+        "Window",
+        options=["30 days", "90 days", "All time"],
+        index=0,
+        horizontal=True,
+        key=f"trend_window_{target_name}",
+    )
+    days_map = {"30 days": 30, "90 days": 90, "All time": 3650}
+    lookback = days_map[window_label]
+
+    df = _build_score_timeseries(score_rows, lookback)
+    if df.empty:
+        st.caption(f"_No scored data in the last {window_label}._")
+        return
+
+    df["date"] = pd.to_datetime(df["date"])
+
+    # Neutral reference band: -2 to +2
+    neutral_band = alt.Chart(
+        pd.DataFrame({"y1": [-2], "y2": [2]})
+    ).mark_rect(opacity=0.08, color="#6b7280").encode(
+        y=alt.Y("y1:Q"),
+        y2=alt.Y2("y2:Q"),
+    )
+
+    # Zero line
+    zero_rule = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(
+        color="#6b7280", strokeDash=[4, 4], opacity=0.5
+    ).encode(y="y:Q")
+
+    # Daily avg bars (light)
+    bars = alt.Chart(df).mark_bar(opacity=0.3, color="#0d9488").encode(
+        x=alt.X("date:T", title="Date"),
+        y=alt.Y("score:Q", title="Sentiment Score", scale=alt.Scale(domain=[-10, 10])),
+        tooltip=[
+            alt.Tooltip("date:T", title="Date", format="%b %d, %Y"),
+            alt.Tooltip("score:Q", title="Avg Score", format=".1f"),
+        ],
+    )
+
+    # 7-day rolling avg line
+    line = alt.Chart(df).mark_line(color="#0d9488", strokeWidth=2.5).encode(
+        x=alt.X("date:T"),
+        y=alt.Y("rolling_avg:Q", scale=alt.Scale(domain=[-10, 10])),
+        tooltip=[
+            alt.Tooltip("date:T", title="Date", format="%b %d, %Y"),
+            alt.Tooltip("rolling_avg:Q", title="7-day Avg", format=".1f"),
+        ],
+    )
+
+    points = alt.Chart(df).mark_circle(color="#0d9488", size=40).encode(
+        x="date:T",
+        y=alt.Y("rolling_avg:Q", scale=alt.Scale(domain=[-10, 10])),
+        tooltip=[
+            alt.Tooltip("date:T", title="Date", format="%b %d, %Y"),
+            alt.Tooltip("rolling_avg:Q", title="7-day Avg", format=".1f"),
+        ],
+    )
+
+    chart = (neutral_band + zero_rule + bars + line + points).properties(
+        height=260,
+        title=f"{target_name} — Sentiment Score Trend ({window_label})",
+    ).interactive()
+
+    st.altair_chart(chart, use_container_width=True)
+    st.caption(
+        f"Bars = daily avg score | Line = 7-day rolling avg | Gray band = neutral zone (−2 to +2) | "
+        f"{len(df)} day(s) with data"
+    )
+
+
+def render_weekly_brief_tab() -> None:
+    """Show the most recent weekly brief from the reports/ directory."""
+    st.markdown("### Weekly Executive Brief")
+    st.caption("Strategic synthesis of the past 7 days — top opportunities, risks, competitive shifts, and recommended actions.")
+
+    # Locate the reports directory relative to this file
+    reports_dir = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "reports"))
+    reports_dir = os.environ.get("REPORTS_DIR") or reports_dir
+
+    try:
+        files = [
+            f for f in os.listdir(reports_dir)
+            if f.startswith("weekly_brief_") and f.endswith(".md")
+        ]
+    except FileNotFoundError:
+        files = []
+
+    if not files:
+        st.info(
+            "No weekly brief found yet. Generate one by running:\n\n"
+            "```\nPYTHONPATH=src python src/weekly_brief.py\n```"
+        )
+        return
+
+    # Sort descending by filename (YYYY-WXX is lexicographically sortable)
+    files.sort(reverse=True)
+    latest = files[0]
+    file_path = os.path.join(reports_dir, latest)
+
+    # Let user pick a past brief if more than one exists
+    if len(files) > 1:
+        selected = st.selectbox(
+            "Select week",
+            options=files,
+            index=0,
+            format_func=lambda f: f.replace("weekly_brief_", "").replace(".md", ""),
+            key="weekly_brief_select",
+        )
+        file_path = os.path.join(reports_dir, selected)
+        latest = selected
+
+    week_label = latest.replace("weekly_brief_", "").replace(".md", "")
+    st.caption(f"Showing: **{week_label}**")
+    st.divider()
+
+    try:
+        with open(file_path, "r") as f:
+            content = f.read()
+        st.markdown(content, unsafe_allow_html=False)
+    except Exception as e:
+        st.error(f"Could not read weekly brief: {e}")
+
+
+def render_compare_tab(targets: list) -> None:
+    """Compare up to 4 targets side by side."""
+    st.markdown("### Compare Targets")
+    st.caption("Select up to 4 targets to compare their sentiment score, momentum, and top themes.")
+
+    all_names = [t.get("name") or f"Target {t.get('id')}" for t in targets]
+    target_by_name = {(t.get("name") or f"Target {t.get('id')}"): t for t in targets}
+
+    selected_names = st.multiselect(
+        "Choose targets to compare",
+        options=all_names,
+        default=all_names[:min(3, len(all_names))],
+        max_selections=4,
+        key="compare_multiselect",
+    )
+    if not selected_names:
+        st.info("Select at least one target above.")
+        return
+
+    selected_targets = [target_by_name[n] for n in selected_names if n in target_by_name]
+    cols = st.columns(len(selected_targets))
+    for col, target in zip(cols, selected_targets):
+        with col:
+            t_id = target.get("id")
+            score_rows = fetch_all_sentiment_scores_for_target(t_id)
+            sentiment_rows = fetch_recent_sentiment_for_target(t_id, limit=10)
+            render_target_compare_card(target, score_rows, sentiment_rows)
+
+
+def render_rankings_tab(targets: list) -> None:
+    """Leaderboard: all tracked targets ranked by avg sentiment score."""
+    st.markdown("### Sentiment Rankings")
+    st.caption("All tracked targets ranked by average sentiment score. Score is the AI-assigned market sentiment (-10 to +10).")
+
+    scores_by_target = fetch_all_scores_batch()
+    event_counts = fetch_event_count_by_target()
+
+    rows = []
+    for t in targets:
+        t_id = t.get("id")
+        t_name = t.get("name") or "Unknown"
+        ttype = (t.get("target_type") or "").capitalize()
+        t_scores = scores_by_target.get(t_id, [])
+        avg = _avg_score(t_scores)
+        momentum = _compute_momentum(t_scores)
+        n_events = event_counts.get(t_id, 0)
+        rows.append({
+            "target_id": t_id,
+            "name": t_name,
+            "type": ttype,
+            "avg_score": avg,
+            "momentum": momentum,
+            "events": n_events,
+            "readings": len(t_scores),
+        })
+
+    # Sort: targets with scores first (desc), then unscored
+    rows_scored = sorted([r for r in rows if r["avg_score"] is not None], key=lambda x: x["avg_score"], reverse=True)
+    rows_unscored = [r for r in rows if r["avg_score"] is None]
+    rows_sorted = rows_scored + rows_unscored
+
+    if not rows_sorted:
+        st.info("No targets to rank yet.")
+        return
+
+    # Render as a styled table using markdown
+    st.markdown("")
+    header = "| # | Target | Type | Score | Trend | Events | Readings |"
+    divider = "|---|--------|------|-------|-------|--------|----------|"
+    table_lines = [header, divider]
+    for i, r in enumerate(rows_sorted, 1):
+        score_str = f"{r['avg_score']:+d}" if r["avg_score"] is not None else "—"
+        if r["avg_score"] is not None:
+            color = _score_color(r["avg_score"])
+            score_cell = f'<span style="color:{color};font-weight:700;">{score_str}</span>'
+        else:
+            score_cell = "—"
+        # Momentum arrow
+        m = r["momentum"]
+        if m is None:
+            trend = "—"
+        elif m > 0:
+            trend = f"↑ +{m}"
+        elif m < 0:
+            trend = f"↓ {m}"
+        else:
+            trend = "→ 0"
+
+        table_lines.append(
+            f"| {i} | **{r['name']}** | {r['type']} | {score_cell} | {trend} | {r['events']} | {r['readings']} |"
+        )
+
+    st.markdown("\n".join(table_lines), unsafe_allow_html=True)
+
+    # Quick-reference score scale
+    with st.expander("Score scale reference", expanded=False):
+        st.markdown(
+            "| Range | Label |\n|-------|-------|\n"
+            "| +7 to +10 | 🟢 Very Positive |\n"
+            "| +3 to +6  | 🟡 Positive |\n"
+            "| -2 to +2  | ⚪ Neutral |\n"
+            "| -6 to -3  | 🟠 Negative |\n"
+            "| -10 to -7 | 🔴 Very Negative |"
+        )
+
+
+# -----------------------------------------------------------------------------
 # Session state and main flow
 # -----------------------------------------------------------------------------
 def main():
@@ -676,90 +1256,106 @@ def main():
     selected_id = render_sidebar(targets, st.session_state["selected_target_id"])
     st.session_state["selected_target_id"] = selected_id
 
-    if selected_id is None:
-        st.markdown("## Select a company or product in the sidebar.")
-        return
+    tab_dive, tab_compare, tab_rank, tab_brief = st.tabs(["🔍 Deep Dive", "⚡ Compare", "🏆 Rankings", "📋 Weekly Brief"])
 
-    target = fetch_target_by_id(selected_id)
-    render_target_overview(target)
-
-    st.markdown("## Events & sentiment")
-    st.caption(
-        "Headlines and dates for this target, with pros, cons, and voice-of-customer per event. "
-        "Use this to see what happened and what the market said about each moment."
-    )
-    st.markdown("")
-    events = fetch_events_for_target(selected_id)
-
-    def get_sentiment(event_id):
-        return fetch_sentiment_for_event(event_id)
-
-    render_timeline(events, get_sentiment)
-
-    # Show target-level sentiment: use AI summary when available, else aggregate ungrouped rows
-    ungrouped = fetch_sentiment_for_target_ungrouped(selected_id)
-    meaningful_ungrouped = filter_meaningful_sentiment(ungrouped)
-    summary = fetch_target_sentiment_summary(selected_id)
-    agg = aggregate_sentiment(meaningful_ungrouped) if meaningful_ungrouped else {"pros": [], "cons": [], "voice": []}
-    has_summary = summary and ((summary.get("pros") or "").strip() or (summary.get("cons") or "").strip())
-    if meaningful_ungrouped or has_summary:
-        st.divider()
-        st.markdown("### Company sentiment")
-        st.caption(
-            "Sentiment for this target."
-            + (" From **target_sentiment_summary** (rule-based consolidated)." if has_summary else " From **ungrouped sentiment** rows (no summary for this target yet).")
-        )
-        pros_display = _to_bullet_lines(summary["pros"] or "") if has_summary else agg["pros"]
-        cons_display = _to_bullet_lines(summary["cons"] or "") if has_summary else agg["cons"]
-        sources = list({(s.get("source_url") or "").strip() for s in meaningful_ungrouped if (s.get("source_url") or "").strip()})
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.markdown("**Pros**")
-            st.markdown("---")
-            if pros_display:
-                for line in pros_display:
-                    st.markdown(f"- {line}")
-            else:
-                st.caption("_No pros recorded._")
-        with col2:
-            st.markdown("**Cons**")
-            st.markdown("---")
-            if cons_display:
-                for line in cons_display:
-                    st.markdown(f"- {line}")
-            else:
-                st.caption("_No cons recorded._")
-        with col3:
-            st.markdown("**Voice of the Customer**")
-            st.markdown("---")
-            if agg["voice"]:
-                for quote, url in agg["voice"]:
-                    st.markdown(f"> {quote}")
-                    if url:
-                        st.markdown(f"[View Source]({url})")
-            else:
-                st.caption("_No verbatims recorded._")
-        if sources:
-            st.caption(f"Consolidated from {len(meaningful_ungrouped)} source(s).")
-            with st.expander("Source links", expanded=False):
-                for url in sources[:20]:
-                    st.markdown(f"[{_source_label(url)}]({url})")
-                if len(sources) > 20:
-                    st.caption(f"… and {len(sources) - 20} more.")
-
-        # Show strategic analysis for this target when we have it (from any event's cached_analysis)
-        analysis = None
-        for ev in events:
-            if (ev.get("cached_analysis") or "").strip():
-                analysis = (ev.get("cached_analysis") or "").strip()
-                break
-        if analysis:
-            st.divider()
-            st.markdown("**Strategic analysis**")
-            st.markdown("---")
-            st.markdown(analysis)
+    with tab_dive:
+        if selected_id is None:
+            st.info("Select a company or product in the sidebar.")
         else:
-            st.caption("_Run report.py to generate strategic analysis for this target._")
+            target = fetch_target_by_id(selected_id)
+            score_rows = fetch_all_sentiment_scores_for_target(selected_id)
+            render_target_overview(target, score_rows)
+
+            if score_rows:
+                with st.expander("📈 Sentiment trend", expanded=False):
+                    render_trend_chart(score_rows, target.get("name") or "")
+
+            st.markdown("## Events & sentiment")
+            st.caption(
+                "Headlines and dates for this target, with pros, cons, and voice-of-customer per event. "
+                "Use this to see what happened and what the market said about each moment."
+            )
+            st.markdown("")
+            events = fetch_events_for_target(selected_id)
+
+            def get_sentiment(event_id):
+                return fetch_sentiment_for_event(event_id)
+
+            render_timeline(events, get_sentiment)
+
+            # Show target-level sentiment: use AI summary when available, else aggregate ungrouped rows
+            ungrouped = fetch_sentiment_for_target_ungrouped(selected_id)
+            meaningful_ungrouped = filter_meaningful_sentiment(ungrouped)
+            summary = fetch_target_sentiment_summary(selected_id)
+            agg = aggregate_sentiment(meaningful_ungrouped) if meaningful_ungrouped else {"pros": [], "cons": [], "voice": []}
+            has_summary = summary and ((summary.get("pros") or "").strip() or (summary.get("cons") or "").strip())
+            if meaningful_ungrouped or has_summary:
+                st.divider()
+                st.markdown("### Company sentiment")
+                st.caption(
+                    "Sentiment for this target."
+                    + (" From **target_sentiment_summary** (rule-based consolidated)." if has_summary else " From **ungrouped sentiment** rows (no summary for this target yet).")
+                )
+                pros_display = _to_bullet_lines(summary["pros"] or "") if has_summary else agg["pros"]
+                cons_display = _to_bullet_lines(summary["cons"] or "") if has_summary else agg["cons"]
+                sources = list({(s.get("source_url") or "").strip() for s in meaningful_ungrouped if (s.get("source_url") or "").strip()})
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.markdown("**Pros**")
+                    st.markdown("---")
+                    if pros_display:
+                        for line in pros_display:
+                            st.markdown(f"- {line}")
+                    else:
+                        st.caption("_No pros recorded._")
+                with col2:
+                    st.markdown("**Cons**")
+                    st.markdown("---")
+                    if cons_display:
+                        for line in cons_display:
+                            st.markdown(f"- {line}")
+                    else:
+                        st.caption("_No cons recorded._")
+                with col3:
+                    st.markdown("**Voice of the Customer**")
+                    st.markdown("---")
+                    if agg["voice"]:
+                        for quote, url in agg["voice"]:
+                            st.markdown(f"> {quote}")
+                            if url:
+                                st.markdown(f"[View Source]({url})")
+                    else:
+                        st.caption("_No verbatims recorded._")
+                if sources:
+                    st.caption(f"Consolidated from {len(meaningful_ungrouped)} source(s).")
+                    with st.expander("Source links", expanded=False):
+                        for url in sources[:20]:
+                            st.markdown(f"[{_source_label(url)}]({url})")
+                        if len(sources) > 20:
+                            st.caption(f"… and {len(sources) - 20} more.")
+
+                # Show strategic analysis for this target when we have it (from any event's cached_analysis)
+                analysis = None
+                for ev in events:
+                    if (ev.get("cached_analysis") or "").strip():
+                        analysis = (ev.get("cached_analysis") or "").strip()
+                        break
+                if analysis:
+                    st.divider()
+                    st.markdown("**Strategic analysis**")
+                    st.markdown("---")
+                    st.markdown(analysis)
+                else:
+                    st.caption("_Run report.py to generate strategic analysis for this target._")
+
+    with tab_compare:
+        render_compare_tab(targets)
+
+    with tab_rank:
+        render_rankings_tab(targets)
+
+    with tab_brief:
+        render_weekly_brief_tab()
 
 
 if __name__ == "__main__":

@@ -39,14 +39,21 @@ CORE_LEMMAS = {
     "layoff", "fire", "resign", "hire", "depart",
     "sue", "settle", "fine", "probe", "ban", "block",
     "partner", "collaborate", "expand", "halt", "delay",
+    # Financial / earnings signals
+    "beat", "miss", "guidance", "forecast", "outlook", "quarter",
+    "quarterly", "downgrade", "upgrade", "cut", "raise", "lower",
 }
 
 RSS_FEEDS = [
+    # Tech news (event discovery)
     "https://techcrunch.com/feed/",
     "https://www.theverge.com/rss/index.xml",
     "https://www.wired.com/feed/rss",
     "https://www.engadget.com/rss.xml",
     "https://www.zdnet.com/news/rss.xml",
+    # Financial / earnings news (P7: source diversity)
+    "https://feeds.reuters.com/reuters/businessNews",
+    "https://finance.yahoo.com/news/rssindex",
 ]
 
 

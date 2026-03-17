@@ -1,6 +1,7 @@
 """
 Tracker: fetches HN/Reddit chatter for each target, filters by vector similarity, extracts pros/cons via AI, saves to Supabase.
 """
+import json
 import logging
 import os
 import sys
@@ -19,13 +20,14 @@ if _src_dir not in sys.path:
 
 from config import (
     get_supabase,
-    get_model,
-    get_embedding_model_name,
+    get_json_model,
     MATCH_THRESHOLD,
     HTTP_TIMEOUT_SEC,
     REQUEST_DELAY_BETWEEN_TARGETS_SEC,
     HN_SEARCH_LIMIT,
     REDDIT_SEARCH_LIMIT,
+    STACKOVERFLOW_SEARCH_LIMIT,
+    GOOGLE_NEWS_LIMIT,
 )
 
 logger = logging.getLogger(__name__)
@@ -147,6 +149,68 @@ def search_reddit(query: str) -> str:
         return ""
 
 
+def search_stackoverflow(query: str) -> str:
+    """Fetch recent Stack Overflow questions for the query. No API key needed for basic use.
+    Returns combined title+body text or empty string on error."""
+    url = (
+        f"https://api.stackexchange.com/2.3/search"
+        f"?order=desc&sort=creation&intitle={requests.utils.quote(query)}"
+        f"&site=stackoverflow&pagesize={STACKOVERFLOW_SEARCH_LIMIT}&filter=withbody"
+    )
+    try:
+        response = requests.get(url, timeout=HTTP_TIMEOUT_SEC)
+        response.raise_for_status()
+        items = response.json().get("items", [])[:STACKOVERFLOW_SEARCH_LIMIT]
+        logger.debug("StackOverflow query=%r hits=%s", query, len(items))
+        parts = []
+        for item in items:
+            title = (item.get("title") or "").strip()
+            body = (item.get("body") or "")[:300].replace("\n", " ").strip()
+            link = item.get("link") or ""
+            parts.append(f"{title} - {body} [URL: {link}]")
+        return " ".join(parts) if parts else ""
+    except requests.RequestException as e:
+        logger.warning("Stack Overflow request failed for %s: %s", query, e)
+        return ""
+
+
+def search_google_news_financial(query: str) -> str:
+    """Fetch Google News RSS for financial/earnings context. Returns combined text or empty string."""
+    import feedparser
+    financial_query = requests.utils.quote(f"{query} earnings OR revenue OR quarterly results")
+    url = f"https://news.google.com/rss/search?q={financial_query}&hl=en-US&gl=US&ceid=US:en"
+    try:
+        feed = feedparser.parse(url)
+        entries = (getattr(feed, "entries", None) or [])[:GOOGLE_NEWS_LIMIT]
+        logger.debug("GoogleNews query=%r hits=%s", query, len(entries))
+        parts = []
+        for entry in entries:
+            title = (getattr(entry, "title", "") or "").strip()
+            summary = (getattr(entry, "summary", "") or "")[:200].replace("\n", " ").strip()
+            link = (getattr(entry, "link", "") or "").strip()
+            parts.append(f"{title} - {summary} [URL: {link}]")
+        return " ".join(parts) if parts else ""
+    except Exception as e:
+        logger.warning("Google News request failed for %s: %s", query, e)
+        return ""
+
+
+def _build_source_type(hn: bool, reddit: bool, so: bool, news: bool) -> str:
+    """Build a pipe-separated source type string from which sources had data."""
+    active = []
+    if hn:
+        active.append("hn")
+    if reddit:
+        active.append("reddit")
+    if so:
+        active.append("stackoverflow")
+    if news:
+        active.append("google_news")
+    if not active:
+        return "unknown"
+    return "|".join(active)
+
+
 def get_embedding(text: str) -> list:
     """Converts text into an embedding vector using a local model (no external API).
 
@@ -161,23 +225,88 @@ def get_embedding(text: str) -> list:
     return vec.tolist()
 
 
+_VALID_TAGS = {"threat", "opportunity", "monitor", "no_action"}
+
+
+def _parse_json_sentiment(text: str) -> Optional[dict]:
+    """
+    Parse Gemini JSON-mode response into a sentiment dict.
+    Expected keys: pros, cons, verbatim_quotes, source_url, sentiment_score, implication_tag.
+    Returns None if the JSON is missing required keys or is unparseable.
+    """
+    text = text.strip()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        logger.warning("JSON parse error: %s | raw=%r", e, text[:200])
+        return None
+
+    if not isinstance(data, dict):
+        return None
+
+    pros = str(data.get("pros") or "").strip()
+    cons = str(data.get("cons") or "").strip()
+    quotes = str(data.get("verbatim_quotes") or "").strip()
+    url = str(data.get("source_url") or "").strip()
+
+    if not any([pros, cons, quotes]):
+        return None
+
+    result = {
+        "pros": pros,
+        "cons": cons,
+        "verbatim_quotes": quotes,
+        "source_url": url,
+        "sentiment_score": None,
+        "implication_tag": None,
+    }
+
+    raw_score = data.get("sentiment_score")
+    if raw_score is not None:
+        try:
+            result["sentiment_score"] = max(-10, min(10, int(raw_score)))
+        except (TypeError, ValueError):
+            pass
+
+    raw_tag = str(data.get("implication_tag") or "").strip().lower()
+    if raw_tag in _VALID_TAGS:
+        result["implication_tag"] = raw_tag
+
+    return result
+
+
 def _parse_ai_sentiment_line(line: str) -> Optional[dict]:
     """
-    Parse AI response line: PROS: ... | CONS: ... | QUOTES: ... | URL: ...
-    Returns dict with pros, cons, verbatim_quotes, source_url or None.
+    Parse AI response line: PROS: ... | CONS: ... | QUOTES: ... | URL: ... | SCORE: N | TAG: tag
+    SCORE and TAG are optional for backward compatibility with old rows.
+    Returns dict with pros, cons, verbatim_quotes, source_url, sentiment_score, implication_tag or None.
     """
     line = line.strip().replace("\n", " ")
     if "PROS:" not in line or "CONS:" not in line or "QUOTES:" not in line or "URL:" not in line:
         return None
-    parts = [p.strip() for p in line.split("|", 3)]
+    parts = [p.strip() for p in line.split("|", 5)]
     if len(parts) < 4:
         return None
-    return {
+    result = {
         "pros": parts[0].replace("PROS:", "").strip(),
         "cons": parts[1].replace("CONS:", "").strip(),
         "verbatim_quotes": parts[2].replace("QUOTES:", "").strip(),
         "source_url": parts[3].replace("URL:", "").strip(),
+        "sentiment_score": None,
+        "implication_tag": None,
     }
+    if len(parts) >= 5:
+        raw_score = parts[4].replace("SCORE:", "").strip()
+        try:
+            score = int(raw_score)
+            result["sentiment_score"] = max(-10, min(10, score))
+        except (ValueError, TypeError):
+            pass
+    if len(parts) >= 6:
+        raw_tag = parts[5].replace("TAG:", "").strip().lower()
+        if raw_tag in _VALID_TAGS:
+            result["implication_tag"] = raw_tag
+    return result
 
 
 def run_tracker() -> None:
@@ -190,7 +319,6 @@ def run_tracker() -> None:
         return
 
     today_str = datetime.utcnow().strftime("%Y-%m-%d")
-    model = get_model()
 
     # Optional cap: limit how many (target,event) searches we perform in a run.
     # Useful for quick tests: set TRACKER_MAX_EVENTS=5 to only process the first 5 events.
@@ -240,15 +368,26 @@ def run_tracker() -> None:
             logger.info("📡 %s | %s | query=%r", name, headline[:80], search_query)
             hn_data = search_hacker_news(search_query)
             reddit_data = search_reddit(search_query)
+            so_data = search_stackoverflow(search_query)
+            news_data = search_google_news_financial(name)  # use bare name for financial news
 
             combined_chatter = ""
             if hn_data:
                 combined_chatter += f"[SOURCE: Hacker News] {hn_data} "
             if reddit_data:
-                combined_chatter += f"[SOURCE: Reddit] {reddit_data}"
+                combined_chatter += f"[SOURCE: Reddit] {reddit_data} "
+            if so_data:
+                combined_chatter += f"[SOURCE: Stack Overflow] {so_data} "
+            if news_data:
+                combined_chatter += f"[SOURCE: Google News Financial] {news_data}"
+
+            source_type = _build_source_type(bool(hn_data), bool(reddit_data), bool(so_data), bool(news_data))
 
             if not combined_chatter.strip():
-                logger.info("   -> No fresh chatter (hn=%s reddit=%s).", bool(hn_data), bool(reddit_data))
+                logger.info(
+                    "   -> No fresh chatter (hn=%s reddit=%s so=%s news=%s).",
+                    bool(hn_data), bool(reddit_data), bool(so_data), bool(news_data),
+                )
                 if REQUEST_DELAY_BETWEEN_TARGETS_SEC > 0:
                     time.sleep(REQUEST_DELAY_BETWEEN_TARGETS_SEC)
                 continue
@@ -293,22 +432,38 @@ def run_tracker() -> None:
 
             tracking_context = headline
             prompt = f"""
-        You are a Principal Market Intelligence Analyst.
-        We are tracking this target in the context of: "{tracking_context}".
-        Focus your analysis on market sentiment related to THIS specific topic. Prioritize pros, cons, and quotes that speak to this context. If the chatter mentions other themes about {name}, note them only briefly; the main output must be intelligence about the tracking context above.
+You are a Principal Market Intelligence Analyst.
+We are tracking: "{name}" in the context of: "{tracking_context}".
+Focus on market sentiment related to THIS specific topic. If chatter mentions other themes, note them only briefly.
 
-        Target: {name}
-        Format EXACTLY like this (use | to separate):
-        PROS: [summary] | CONS: [summary] | QUOTES: "[Quote]" | URL: [URL]
+Analyze the chatter below and return a single JSON object with exactly these keys:
+{{
+  "pros": "brief summary of positive market sentiment (or empty string if none)",
+  "cons": "brief summary of negative market sentiment (or empty string if none)",
+  "verbatim_quotes": "one direct quote from the chatter that best captures the mood",
+  "source_url": "URL of the most relevant source from the chatter",
+  "sentiment_score": <integer from -10 to 10; -10=very negative, 0=neutral, +10=very positive>,
+  "implication_tag": "<one of: threat, opportunity, monitor, no_action>"
+}}
 
-        Chatter data:
-        {combined_chatter}
-        """
+implication_tag rules:
+- threat: negative sentiment indicating a competitor gaining ground or risk to our position
+- opportunity: positive signal about a gap or weakness we could exploit
+- monitor: ambiguous/early signal worth watching but not yet actionable
+- no_action: neutral noise with no clear strategic implication
+
+Chatter data:
+{combined_chatter}
+"""
 
             try:
-                ai_response = model.generate_content(prompt)
-                line = (ai_response.text or "").strip().replace("\n", " ")
-                parsed = _parse_ai_sentiment_line(line)
+                json_model = get_json_model()
+                ai_response = json_model.generate_content(prompt)
+                raw_text = (ai_response.text or "").strip()
+                parsed = _parse_json_sentiment(raw_text)
+                if parsed is None:
+                    # Fallback: try legacy pipe format in case JSON mode returned plain text
+                    parsed = _parse_ai_sentiment_line(raw_text.replace("\n", " "))
                 if parsed:
                     insert_row = {
                         "target_id": t_id,
@@ -318,6 +473,11 @@ def run_tracker() -> None:
                         "source_url": parsed["source_url"],
                         "embedding": chatter_vector,
                     }
+                    if parsed.get("sentiment_score") is not None:
+                        insert_row["sentiment_score"] = parsed["sentiment_score"]
+                    if parsed.get("implication_tag") is not None:
+                        insert_row["implication_tag"] = parsed["implication_tag"]
+                    insert_row["source_type"] = source_type
                     if event_id is not None:
                         insert_row["event_id"] = event_id
                     # Text-exact guard: if we already have an identical pros/cons/quotes triple

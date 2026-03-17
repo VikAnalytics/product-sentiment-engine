@@ -1,12 +1,14 @@
 name: Daily Sentiment Engine
 
 on:
-  workflow_dispatch: # This single line allows cron-job.org to trigger the engine remotely
+  workflow_dispatch: # Allows cron-job.org or manual triggers
+  schedule:
+    - cron: '0 7 * * 1'  # Every Monday at 07:00 UTC — also runs weekly brief
 
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
-    
+
     # We need permissions to commit the final report back to your repo
     permissions:
       contents: write
@@ -27,7 +29,7 @@ jobs:
           pip install -r requirements.txt
           python -m spacy download en_core_web_sm
 
-      - name: Run V2 Engine
+      - name: Run Daily Pipeline
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -37,7 +39,16 @@ jobs:
           python src/tracker.py
           python src/report.py
 
-      - name: Save Daily Report to GitHub
+      - name: Run Weekly Brief (Mondays only)
+        if: github.event_name == 'schedule'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python src/weekly_brief.py
+
+      - name: Save Reports to GitHub
         run: |
           git config --local user.name "github-actions[bot]"
           git config --local user.email "github-actions[bot]@users.noreply.github.com"

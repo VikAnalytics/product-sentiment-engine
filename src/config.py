@@ -21,6 +21,8 @@ REQUEST_DELAY_BETWEEN_TARGETS_SEC = 1.0
 ARTICLES_PER_FEED = 10
 HN_SEARCH_LIMIT = 3
 REDDIT_SEARCH_LIMIT = 3
+STACKOVERFLOW_SEARCH_LIMIT = 3
+GOOGLE_NEWS_LIMIT = 3
 LOOKBACK_DAYS = 1
 MAX_PAYLOAD_CHARS_PER_FIELD = 2000  # truncate long pros/cons in report payload to avoid token limits
 
@@ -63,13 +65,26 @@ def _configure_genai() -> None:
 
 
 def get_model():
-    """Return Gemini generative model. Validates env on first use."""
+    """Return Gemini generative model (free-form text). Validates env on first use."""
     global _genai_model
     if _genai_model is None:
         _configure_genai()
         import google.generativeai as genai
         _genai_model = genai.GenerativeModel(GEMINI_MODEL_NAME)
     return _genai_model
+
+
+def get_json_model():
+    """Return a Gemini model configured to return structured JSON (application/json MIME type).
+    Use this for structured extraction (tracker); use get_model() for free-form reports."""
+    _configure_genai()
+    import google.generativeai as genai
+    return genai.GenerativeModel(
+        model_name=GEMINI_MODEL_NAME,
+        generation_config=genai.GenerationConfig(
+            response_mime_type="application/json",
+        ),
+    )
 
 
 def get_embedding_model_name() -> str:

@@ -7,6 +7,7 @@ Run from project root:
 Or with explicit Python path:
   PYTHONPATH=src streamlit run src/app.py
 """
+import base64
 import os
 import sys
 
@@ -51,7 +52,7 @@ except ImportError:
 # -----------------------------------------------------------------------------
 st.set_page_config(
     layout="wide",
-    page_title="Intelligence Dashboard",
+    page_title="Market Intelligence",
     initial_sidebar_state="expanded",
 )
 
@@ -63,23 +64,218 @@ def _inject_custom_css() -> None:
     st.markdown(
         """
         <style>
-        /* Hero initial circle when no logo */
-        .hero-initial {
-            width: 64px;
-            height: 64px;
+        /* ── Global ─────────────────────────────────────────── */
+        html, body, [class*="css"] {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                         Helvetica, Arial, sans-serif !important;
+            -webkit-font-smoothing: antialiased;
+        }
+        .stApp { background: #F5F5F7 !important; }
+        #MainMenu { visibility: hidden; }
+        footer { visibility: hidden; }
+        header[data-testid="stHeader"] { background: transparent !important; box-shadow: none !important; }
+        .stAppDeployButton { display: none !important; }
+        .stMainBlockContainer { padding-top: 2rem !important; }
+
+        /* ── Sidebar ─────────────────────────────────────────── */
+        [data-testid="stSidebar"] {
+            background: rgba(255,255,255,0.92) !important;
+            backdrop-filter: blur(20px);
+            border-right: 1px solid rgba(0,0,0,0.07) !important;
+        }
+        [data-testid="stSidebar"] .stMarkdown h2 {
+            font-size: 1rem; font-weight: 700; color: #1D1D1F; letter-spacing: -0.02em;
+        }
+        [data-testid="stSidebar"] [data-testid="stExpander"] {
+            background: rgba(0,0,0,0.02) !important;
+            border-radius: 12px !important;
+            border: 1px solid rgba(0,0,0,0.07) !important;
+            box-shadow: none !important;
+        }
+
+        /* ── Typography ──────────────────────────────────────── */
+        h1, h2, h3 { color: #1D1D1F; letter-spacing: -0.03em; line-height: 1.15; font-weight: 700; }
+        p, li { color: #1D1D1F; line-height: 1.6; }
+        .stCaption, [data-testid="stCaptionContainer"] p { color: #86868B !important; font-size: 0.82rem !important; }
+
+        /* ── Tabs ─────────────────────────────────────────────── */
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 4px;
+            background: rgba(0,0,0,0.05);
+            border-radius: 14px;
+            padding: 5px;
+            border: none;
+        }
+        .stTabs [data-baseweb="tab"] {
             border-radius: 10px;
-            background: #0d9488;
-            color: #fff;
-            font-size: 24px;
-            font-weight: 700;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
+            padding: 8px 22px;
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: #86868B;
+            border: none;
+            background: transparent;
+            transition: all 0.18s ease;
+        }
+        .stTabs [aria-selected="true"] {
+            background: #FFFFFF !important;
+            color: #1D1D1F !important;
+            font-weight: 600;
+            box-shadow: 0 1px 6px rgba(0,0,0,0.10);
+        }
+
+        /* ── Expanders ───────────────────────────────────────── */
+        [data-testid="stExpander"] {
+            background: rgba(255,255,255,0.80) !important;
+            backdrop-filter: blur(20px);
+            border-radius: 18px !important;
+            border: 1px solid rgba(0,0,0,0.06) !important;
+            box-shadow: 0 2px 18px rgba(0,0,0,0.04) !important;
+            margin-bottom: 12px;
+            overflow: hidden;
+        }
+        [data-testid="stExpander"] details summary p {
+            font-weight: 600 !important;
+            font-size: 0.95rem !important;
+            color: #1D1D1F !important;
+        }
+        [data-testid="stExpander"] details summary:hover { background: rgba(0,0,0,0.02); }
+
+        /* ── Inputs / Selects ────────────────────────────────── */
+        [data-baseweb="select"] > div { border-radius: 12px !important; }
+        [data-testid="stMultiSelect"] span[data-baseweb="tag"] {
+            border-radius: 8px; background: rgba(0,113,227,0.1); color: #0071E3;
+        }
+        [data-testid="stRadio"] label { font-size: 0.875rem; font-weight: 500; }
+        [data-testid="stAlert"] { border-radius: 14px; border: none !important; }
+        hr { border-color: rgba(0,0,0,0.06); }
+
+        /* ── Glass hero card ─────────────────────────────────── */
+        .hero-card {
+            background: rgba(255,255,255,0.88);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border-radius: 24px;
+            border: 1px solid rgba(255,255,255,0.70);
+            box-shadow: 0 8px 40px rgba(0,0,0,0.07);
+            padding: 36px 40px;
+            margin-bottom: 24px;
+        }
+        .hero-initial {
+            width: 72px; height: 72px; border-radius: 18px;
+            background: linear-gradient(135deg, #0071E3, #0055B3);
+            color: #fff; font-size: 28px; font-weight: 700;
+            display: inline-flex; align-items: center; justify-content: center;
+            box-shadow: 0 4px 16px rgba(0,113,227,0.28);
+        }
+        .hero-type {
+            font-size: 0.70rem; font-weight: 700; color: #86868B;
+            letter-spacing: 0.10em; text-transform: uppercase; display: block; margin-bottom: 4px;
+        }
+        .hero-name {
+            font-size: 2rem; font-weight: 700; color: #1D1D1F;
+            letter-spacing: -0.04em; line-height: 1.1; margin: 0;
+        }
+        .hero-desc {
+            font-size: 0.95rem; color: #424245; line-height: 1.65; margin-top: 16px;
+        }
+
+        /* ── Badge pills ─────────────────────────────────────── */
+        .score-pill {
+            display: inline-flex; align-items: center; gap: 5px;
+            padding: 4px 13px; border-radius: 980px;
+            font-size: 0.78rem; font-weight: 600; line-height: 1.4;
+        }
+        .badge-row {
+            display: flex; align-items: center; gap: 8px;
+            flex-wrap: wrap; margin: 12px 0 0 0;
+        }
+
+        /* ── Event card internals ────────────────────────────── */
+        .pcc-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 28px;
+            margin: 4px 0 12px 0;
+        }
+        .pcc-label {
+            font-size: 0.68rem; font-weight: 700; color: #86868B;
+            letter-spacing: 0.10em; text-transform: uppercase;
+            margin-bottom: 10px; padding-bottom: 8px;
+            border-bottom: 1px solid rgba(0,0,0,0.07);
+        }
+        .pcc-item {
+            font-size: 0.875rem; color: #1D1D1F; line-height: 1.6;
+            padding: 5px 0; border-bottom: 1px solid rgba(0,0,0,0.04);
+            display: flex; gap: 8px; align-items: flex-start;
+        }
+        .pcc-item-dot { color: #86868B; flex-shrink: 0; margin-top: 2px; }
+        .pcc-quote {
+            font-size: 0.85rem; color: #424245; line-height: 1.65; font-style: italic;
+            border-left: 3px solid #0071E3;
+            padding: 8px 0 8px 14px; margin: 6px 0;
+            background: rgba(0,113,227,0.03); border-radius: 0 8px 8px 0;
+        }
+        .pcc-source-link {
+            font-size: 0.72rem; color: #0071E3; font-weight: 500;
+            text-decoration: none; display: inline-block; margin-top: 3px;
+        }
+        .pcc-empty { font-size: 0.85rem; color: #86868B; }
+        .pcc-badge-row {
+            display: flex; align-items: center; gap: 8px;
+            flex-wrap: wrap; margin-bottom: 18px;
+        }
+        .pcc-source-caption {
+            font-size: 0.75rem; color: #86868B;
+            padding: 3px 10px; background: rgba(0,0,0,0.04); border-radius: 980px;
+        }
+
+        /* ── Rankings ────────────────────────────────────────── */
+        .rank-row {
+            display: flex; align-items: center;
+            padding: 14px 20px; margin-bottom: 6px;
+            background: rgba(255,255,255,0.88);
+            border-radius: 14px; border: 1px solid rgba(0,0,0,0.05);
+            gap: 14px;
+        }
+        .rank-num { font-size: 0.85rem; font-weight: 700; color: #86868B; width: 28px; flex-shrink: 0; text-align: center; }
+        .rank-name-wrap { flex: 1; min-width: 0; }
+        .rank-name { font-size: 0.9rem; font-weight: 600; color: #1D1D1F; }
+        .rank-type { font-size: 0.7rem; color: #86868B; letter-spacing: 0.05em; text-transform: uppercase; }
+        .rank-meta { font-size: 0.8rem; color: #86868B; white-space: nowrap; }
+
+        /* ── Section heads ───────────────────────────────────── */
+        .section-head {
+            font-size: 1.5rem; font-weight: 700; color: #1D1D1F;
+            letter-spacing: -0.03em; margin: 0 0 4px 0;
+        }
+        .section-sub {
+            font-size: 0.875rem; color: #86868B; line-height: 1.5; margin-bottom: 20px;
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
+
+
+# -----------------------------------------------------------------------------
+# HTML helpers
+# -----------------------------------------------------------------------------
+def _he(text: str) -> str:
+    """HTML-escape a string for safe inline insertion."""
+    return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def _logo_data_url(logo_bytes: bytes) -> str:
+    """Convert logo bytes to an inline data URL."""
+    if logo_bytes[:4] == b"\x89PNG":
+        mime = "image/png"
+    elif logo_bytes[:2] == b"\xff\xd8":
+        mime = "image/jpeg"
+    elif b"<svg" in logo_bytes[:200].lower() or logo_bytes[:5] == b"<?xml":
+        mime = "image/svg+xml"
+    else:
+        mime = "image/png"
+    return f"data:{mime};base64,{base64.b64encode(logo_bytes).decode()}"
 
 
 # -----------------------------------------------------------------------------
@@ -119,7 +315,7 @@ def _render_score_badge(score: Optional[int]) -> None:
     label = _score_label(score)
     sign = "+" if score > 0 else ""
     st.markdown(
-        f'<span style="background:{color};color:#fff;padding:2px 10px;border-radius:12px;font-size:0.78rem;font-weight:600;">'
+        f'<span class="score-pill" style="background:{color};color:#fff;">'
         f'{arrow} {sign}{score} {label}</span>',
         unsafe_allow_html=True,
     )
@@ -209,8 +405,8 @@ def _render_tag_badge(tag: Optional[str]) -> None:
         return
     meta = _TAG_META[tag]
     st.markdown(
-        f'<span style="background:{meta["color"]};color:#fff;padding:2px 10px;border-radius:12px;'
-        f'font-size:0.78rem;font-weight:600;">{meta["emoji"]} {meta["label"]}</span>',
+        f'<span class="score-pill" style="background:{meta["color"]};color:#fff;">'
+        f'{meta["emoji"]} {meta["label"]}</span>',
         unsafe_allow_html=True,
     )
 
@@ -229,7 +425,7 @@ def _render_momentum_badge(momentum: Optional[float]) -> None:
         color, arrow = "#6b7280", "→"
         label = "Stable vs last 7 days"
     st.markdown(
-        f'<span style="background:{color};color:#fff;padding:2px 10px;border-radius:12px;font-size:0.78rem;font-weight:600;">'
+        f'<span class="score-pill" style="background:{color};color:#fff;">'
         f'{arrow} {label}</span>',
         unsafe_allow_html=True,
     )
@@ -565,7 +761,11 @@ def aggregate_sentiment(sentiments: list) -> dict:
 def render_sidebar(targets: list, selected_target_id: Optional[int]) -> Optional[int]:
     """Render sidebar: Companies first; Products filtered by selected company. Returns selected target_id."""
     with st.sidebar:
-        st.markdown("## Market Intelligence Engine")
+        st.markdown(
+            '<p style="font-size:1rem;font-weight:700;color:#1D1D1F;letter-spacing:-0.02em;margin:0 0 4px 0;">Market Intelligence</p>'
+            '<p style="font-size:0.75rem;color:#86868B;margin:0 0 12px 0;">Powered by Gemini · Supabase</p>',
+            unsafe_allow_html=True,
+        )
         st.divider()
 
         companies = [t for t in targets if (t.get("target_type") or "").upper() == "COMPANY"]
@@ -697,30 +897,62 @@ def render_target_overview(target: dict, score_rows: Optional[list] = None) -> N
     # Hero: try primary logo_url (Clearbit), then Google favicon by domain; else initial
     domain = target.get("domain") or (_domain_from_logo_url(logo_url) if logo_url else None)
     logo_bytes = _get_logo_bytes(logo_url, domain)
-    col_logo, col_name = st.columns([0.12, 0.88])
-    with col_logo:
-        if logo_bytes:
-            st.image(logo_bytes, width=64)
-        else:
-            st.markdown(f'<span class="hero-initial">{initial}</span>', unsafe_allow_html=True)
-    with col_name:
-        st.markdown(f"## {name}")
-        # Show current avg score + momentum if we have score data
-        if score_rows:
-            recent_scores = [r.get("sentiment_score") for r in score_rows[-10:] if r.get("sentiment_score") is not None]
-            if recent_scores:
-                avg = round(sum(recent_scores) / len(recent_scores))
-                _render_score_badge(avg)
-                st.markdown("")
-            momentum = _compute_momentum(score_rows)
-            if momentum is not None:
-                _render_momentum_badge(momentum)
-    if description:
-        desc_escaped = description.replace("<", "&lt;").replace(">", "&gt;")
-        st.markdown(f'<p style="margin-top:0.5rem; margin-bottom:1rem; color:#374151; line-height:1.6;">{desc_escaped}</p>', unsafe_allow_html=True)
+    target_type = (target.get("target_type") or "").upper()
+
+    # Build inline logo HTML (data URL avoids st.image layout constraints)
+    if logo_bytes:
+        data_url = _logo_data_url(logo_bytes)
+        logo_html = (
+            f'<img src="{data_url}" width="72" height="72" '
+            f'style="border-radius:14px;object-fit:contain;flex-shrink:0;" />'
+        )
     else:
-        st.caption("No description.")
-    st.divider()
+        logo_html = f'<div class="hero-initial">{_he(initial)}</div>'
+
+    # Score + momentum badges
+    badges = []
+    if score_rows:
+        recent_scores = [r.get("sentiment_score") for r in score_rows[-10:] if r.get("sentiment_score") is not None]
+        if recent_scores:
+            avg = round(sum(recent_scores) / len(recent_scores))
+            color = _score_color(avg)
+            arrow = "▲" if avg > 0 else ("▼" if avg < 0 else "●")
+            sign = "+" if avg > 0 else ""
+            badges.append(
+                f'<span class="score-pill" style="background:{color};color:#fff;">'
+                f'{arrow} {sign}{avg} {_score_label(avg)}</span>'
+            )
+        momentum = _compute_momentum(score_rows)
+        if momentum is not None:
+            if momentum > 0:
+                mc, ma, ml = "#16a34a", "↑", f"+{momentum} vs last 7d"
+            elif momentum < 0:
+                mc, ma, ml = "#dc2626", "↓", f"{momentum} vs last 7d"
+            else:
+                mc, ma, ml = "#6b7280", "→", "Stable vs last 7d"
+            badges.append(
+                f'<span class="score-pill" style="background:{mc};color:#fff;">{ma} {ml}</span>'
+            )
+    badge_html = f'<div class="badge-row">{"".join(badges)}</div>' if badges else ""
+    type_html = f'<span class="hero-type">{_he(target_type)}</span>' if target_type else ""
+    desc_html = f'<div class="hero-desc">{_he(description)}</div>' if description else ""
+
+    st.markdown(
+        f"""
+        <div class="hero-card">
+          <div style="display:flex;align-items:flex-start;gap:20px;">
+            {logo_html}
+            <div style="flex:1;min-width:0;">
+              {type_html}
+              <div class="hero-name">{_he(name)}</div>
+              {badge_html}
+            </div>
+          </div>
+          {desc_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -744,84 +976,97 @@ def _source_label(url: str) -> str:
 
 
 def render_event_card(event: dict, sentiments: list) -> None:
-    """Render one event as an expander with headline+date; inside, each sentiment as a card with 3 columns."""
+    """Render one event as an expander; prose/cons/quotes as a clean HTML grid inside."""
     headline = (event.get("headline") or "").strip() or "Untitled event"
     created = event.get("created_at")
     if created:
         try:
-            if isinstance(created, str) and "T" in created:
-                dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
-            else:
-                dt = created
+            dt = datetime.fromisoformat(created.replace("Z", "+00:00")) if isinstance(created, str) and "T" in created else created
             date_str = dt.strftime("%b %d, %Y") if hasattr(dt, "strftime") else str(created)
         except Exception:
             date_str = str(created)
     else:
         date_str = ""
 
-    # Compute tag before rendering so we can prefix the expander label
     tag = _dominant_tag(sentiments)
     tag_prefix = f"{_TAG_META[tag]['emoji']} " if tag and tag in _TAG_META else ""
     label = f"{tag_prefix}{headline} — {date_str}" if date_str else f"{tag_prefix}{headline}"
 
     with st.expander(label, expanded=True):
         if not sentiments:
-            st.caption(
-                "_No new chatter for this event._ The tracker runs on HN/Reddit and saves "
-                "pros, cons, and quotes per event when it finds net-new signal."
-            )
+            st.caption("No new chatter for this event. The tracker saves pros, cons, and quotes when it finds net-new signal.")
             return
 
-        # One consolidated view: merge all sources and dedupe so we don't repeat the same points
         agg = aggregate_sentiment(sentiments)
         sources = list({(s.get("source_url") or "").strip() for s in sentiments if (s.get("source_url") or "").strip()})
-
-        # Score + implication tag + source badges
         scores = [s.get("sentiment_score") for s in sentiments if s.get("sentiment_score") is not None]
         avg_score = round(sum(scores) / len(scores)) if scores else None
         source_label = _format_source_type([s.get("source_type") for s in sentiments])
-        badge_cols = st.columns([0.22, 0.22, 0.56])
-        with badge_cols[0]:
-            if avg_score is not None:
-                _render_score_badge(avg_score)
-        with badge_cols[1]:
-            if tag:
-                _render_tag_badge(tag)
-        with badge_cols[2]:
-            if source_label:
-                st.caption(f"Sources: {source_label}")
-        st.markdown("")
 
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.markdown("**Pros**")
-            st.markdown("---")
-            if agg["pros"]:
-                for line in agg["pros"]:
-                    st.markdown(f"- {line}")
-            else:
-                st.caption("_No pros recorded._")
-            st.markdown("")
-        with col2:
-            st.markdown("**Cons**")
-            st.markdown("---")
-            if agg["cons"]:
-                for line in agg["cons"]:
-                    st.markdown(f"- {line}")
-            else:
-                st.caption("_No cons recorded._")
-            st.markdown("")
-        with col3:
-            st.markdown("**Voice of the Customer**")
-            st.markdown("---")
-            if agg["voice"]:
-                for quote, url in agg["voice"]:
-                    st.markdown(f"> {quote}")
-                    if url:
-                        st.markdown(f"[View Source]({url})")
-                st.markdown("")
-            else:
-                st.caption("_No verbatims recorded._")
+        # ── Badge row (score + tag + source caption) ──────────────
+        badges = []
+        if avg_score is not None:
+            color = _score_color(avg_score)
+            arrow = "▲" if avg_score > 0 else ("▼" if avg_score < 0 else "●")
+            sign = "+" if avg_score > 0 else ""
+            badges.append(
+                f'<span class="score-pill" style="background:{color};color:#fff;">'
+                f'{arrow} {sign}{avg_score} {_score_label(avg_score)}</span>'
+            )
+        if tag and tag in _TAG_META:
+            meta = _TAG_META[tag]
+            badges.append(
+                f'<span class="score-pill" style="background:{meta["color"]};color:#fff;">'
+                f'{meta["emoji"]} {meta["label"]}</span>'
+            )
+        if source_label:
+            badges.append(f'<span class="pcc-source-caption">Sources: {_he(source_label)}</span>')
+
+        st.markdown(
+            f'<div class="pcc-badge-row">{"".join(badges)}</div>',
+            unsafe_allow_html=True,
+        )
+
+        # ── Pros / Cons / Voice grid ───────────────────────────────
+        def _build_bullets(lines):
+            if not lines:
+                return '<span class="pcc-empty">None recorded.</span>'
+            return "".join(
+                f'<div class="pcc-item"><span class="pcc-item-dot">·</span>{_he(line)}</div>'
+                for line in lines
+            )
+
+        def _build_quotes(voice):
+            if not voice:
+                return '<span class="pcc-empty">None recorded.</span>'
+            parts = []
+            for quote, url in voice[:6]:
+                link = (
+                    f'<a href="{url}" target="_blank" class="pcc-source-link">View source →</a>'
+                    if url else ""
+                )
+                parts.append(f'<div class="pcc-quote">{_he(quote)}{link}</div>')
+            return "".join(parts)
+
+        st.markdown(
+            f"""
+            <div class="pcc-grid">
+              <div>
+                <div class="pcc-label">Pros</div>
+                {_build_bullets(agg["pros"])}
+              </div>
+              <div>
+                <div class="pcc-label">Cons</div>
+                {_build_bullets(agg["cons"])}
+              </div>
+              <div>
+                <div class="pcc-label">Voice of the Customer</div>
+                {_build_quotes(agg["voice"])}
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
         if sources:
             st.caption(f"Consolidated from {len(sentiments)} source(s).")
@@ -831,15 +1076,14 @@ def render_event_card(event: dict, sentiments: list) -> None:
                 if len(sources) > 20:
                     st.caption(f"… and {len(sources) - 20} more.")
 
-        # Strategic analysis from report.py (stored in events.cached_analysis when report runs)
+        # Strategic analysis
         analysis = event.get("cached_analysis")
         if analysis:
             st.divider()
             st.markdown("**Strategic analysis**")
-            st.markdown("---")
             st.markdown(analysis)
         else:
-            st.caption("_Run report.py to generate strategic analysis for this event._")
+            st.caption("Run report.py to generate strategic analysis for this event.")
 
 
 def render_timeline(events: list, get_sentiment_fn) -> None:
@@ -1012,9 +1256,9 @@ def render_trend_chart(score_rows: list, target_name: str) -> None:
     ).encode(y="y:Q")
 
     # Daily avg bars (light)
-    bars = alt.Chart(df).mark_bar(opacity=0.3, color="#0d9488").encode(
-        x=alt.X("date:T", title="Date"),
-        y=alt.Y("score:Q", title="Sentiment Score", scale=alt.Scale(domain=[-10, 10])),
+    bars = alt.Chart(df).mark_bar(opacity=0.25, color="#0071E3").encode(
+        x=alt.X("date:T", title=None, axis=alt.Axis(labelColor="#86868B", domainColor="rgba(0,0,0,0.1)", tickColor="transparent", gridColor="rgba(0,0,0,0.04)")),
+        y=alt.Y("score:Q", title="Score", scale=alt.Scale(domain=[-10, 10]), axis=alt.Axis(labelColor="#86868B", titleColor="#86868B", domainColor="rgba(0,0,0,0.1)", gridColor="rgba(0,0,0,0.04)", tickColor="transparent")),
         tooltip=[
             alt.Tooltip("date:T", title="Date", format="%b %d, %Y"),
             alt.Tooltip("score:Q", title="Avg Score", format=".1f"),
@@ -1022,7 +1266,7 @@ def render_trend_chart(score_rows: list, target_name: str) -> None:
     )
 
     # 7-day rolling avg line
-    line = alt.Chart(df).mark_line(color="#0d9488", strokeWidth=2.5).encode(
+    line = alt.Chart(df).mark_line(color="#0071E3", strokeWidth=2.5).encode(
         x=alt.X("date:T"),
         y=alt.Y("rolling_avg:Q", scale=alt.Scale(domain=[-10, 10])),
         tooltip=[
@@ -1031,7 +1275,7 @@ def render_trend_chart(score_rows: list, target_name: str) -> None:
         ],
     )
 
-    points = alt.Chart(df).mark_circle(color="#0d9488", size=40).encode(
+    points = alt.Chart(df).mark_circle(color="#0071E3", size=48, opacity=0.9).encode(
         x="date:T",
         y=alt.Y("rolling_avg:Q", scale=alt.Scale(domain=[-10, 10])),
         tooltip=[
@@ -1042,8 +1286,12 @@ def render_trend_chart(score_rows: list, target_name: str) -> None:
 
     chart = (neutral_band + zero_rule + bars + line + points).properties(
         height=260,
-        title=f"{target_name} — Sentiment Score Trend ({window_label})",
-    ).interactive()
+        title=alt.TitleParams(
+            text=f"{target_name} — Sentiment Trend ({window_label})",
+            fontSize=13, fontWeight="bold", color="#1D1D1F", anchor="start",
+        ),
+        background="transparent",
+    ).configure_view(strokeWidth=0).interactive()
 
     st.altair_chart(chart, use_container_width=True)
     st.caption(
@@ -1054,8 +1302,11 @@ def render_trend_chart(score_rows: list, target_name: str) -> None:
 
 def render_weekly_brief_tab() -> None:
     """Show the most recent weekly brief from the reports/ directory."""
-    st.markdown("### Weekly Executive Brief")
-    st.caption("Strategic synthesis of the past 7 days — top opportunities, risks, competitive shifts, and recommended actions.")
+    st.markdown(
+        '<div class="section-head">Weekly Executive Brief</div>'
+        '<div class="section-sub">Strategic synthesis of the past 7 days — opportunities, risks, competitive shifts, and recommended actions.</div>',
+        unsafe_allow_html=True,
+    )
 
     # Locate the reports directory relative to this file
     reports_dir = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "reports"))
@@ -1107,8 +1358,11 @@ def render_weekly_brief_tab() -> None:
 
 def render_compare_tab(targets: list) -> None:
     """Compare up to 4 targets side by side."""
-    st.markdown("### Compare Targets")
-    st.caption("Select up to 4 targets to compare their sentiment score, momentum, and top themes.")
+    st.markdown(
+        '<div class="section-head">Compare Targets</div>'
+        '<div class="section-sub">Select up to 4 targets to compare sentiment score, momentum, and top themes.</div>',
+        unsafe_allow_html=True,
+    )
 
     all_names = [t.get("name") or f"Target {t.get('id')}" for t in targets]
     target_by_name = {(t.get("name") or f"Target {t.get('id')}"): t for t in targets}
@@ -1136,8 +1390,11 @@ def render_compare_tab(targets: list) -> None:
 
 def render_rankings_tab(targets: list) -> None:
     """Leaderboard: all tracked targets ranked by avg sentiment score."""
-    st.markdown("### Sentiment Rankings")
-    st.caption("All tracked targets ranked by average sentiment score. Score is the AI-assigned market sentiment (-10 to +10).")
+    st.markdown(
+        '<div class="section-head">Sentiment Rankings</div>'
+        '<div class="section-sub">All tracked targets ranked by average AI-assigned market sentiment score (−10 to +10).</div>',
+        unsafe_allow_html=True,
+    )
 
     scores_by_target = fetch_all_scores_batch()
     event_counts = fetch_event_count_by_target()
@@ -1152,54 +1409,57 @@ def render_rankings_tab(targets: list) -> None:
         momentum = _compute_momentum(t_scores)
         n_events = event_counts.get(t_id, 0)
         rows.append({
-            "target_id": t_id,
-            "name": t_name,
-            "type": ttype,
-            "avg_score": avg,
-            "momentum": momentum,
-            "events": n_events,
-            "readings": len(t_scores),
+            "target_id": t_id, "name": t_name, "type": ttype,
+            "avg_score": avg, "momentum": momentum,
+            "events": n_events, "readings": len(t_scores),
         })
 
-    # Sort: targets with scores first (desc), then unscored
     rows_scored = sorted([r for r in rows if r["avg_score"] is not None], key=lambda x: x["avg_score"], reverse=True)
-    rows_unscored = [r for r in rows if r["avg_score"] is None]
-    rows_sorted = rows_scored + rows_unscored
+    rows_sorted = rows_scored + [r for r in rows if r["avg_score"] is None]
 
     if not rows_sorted:
         st.info("No targets to rank yet.")
         return
 
-    # Render as a styled table using markdown
-    st.markdown("")
-    header = "| # | Target | Type | Score | Trend | Events | Readings |"
-    divider = "|---|--------|------|-------|-------|--------|----------|"
-    table_lines = [header, divider]
+    html_rows = []
     for i, r in enumerate(rows_sorted, 1):
-        score_str = f"{r['avg_score']:+d}" if r["avg_score"] is not None else "—"
         if r["avg_score"] is not None:
             color = _score_color(r["avg_score"])
-            score_cell = f'<span style="color:{color};font-weight:700;">{score_str}</span>'
+            score_cell = (
+                f'<span class="score-pill" style="background:{color};color:#fff;">'
+                f'{r["avg_score"]:+d} {_score_label(r["avg_score"])}</span>'
+            )
         else:
-            score_cell = "—"
-        # Momentum arrow
+            score_cell = '<span class="rank-meta">—</span>'
+
         m = r["momentum"]
         if m is None:
-            trend = "—"
+            trend_html = '<span class="rank-meta">—</span>'
         elif m > 0:
-            trend = f"↑ +{m}"
+            trend_html = f'<span style="color:#16a34a;font-weight:600;font-size:0.82rem;">↑ +{m}</span>'
         elif m < 0:
-            trend = f"↓ {m}"
+            trend_html = f'<span style="color:#dc2626;font-weight:600;font-size:0.82rem;">↓ {m}</span>'
         else:
-            trend = "→ 0"
+            trend_html = '<span class="rank-meta">→ 0</span>'
 
-        table_lines.append(
-            f"| {i} | **{r['name']}** | {r['type']} | {score_cell} | {trend} | {r['events']} | {r['readings']} |"
-        )
+        html_rows.append(f"""
+        <div class="rank-row">
+          <span class="rank-num">{i}</span>
+          <div class="rank-name-wrap">
+            <div class="rank-name">{_he(r["name"])}</div>
+            <div class="rank-type">{_he(r["type"])}</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+            {score_cell}
+            {trend_html}
+            <span class="rank-meta">{r["events"]} events</span>
+            <span class="rank-meta">{r["readings"]} readings</span>
+          </div>
+        </div>
+        """)
 
-    st.markdown("\n".join(table_lines), unsafe_allow_html=True)
+    st.markdown("".join(html_rows), unsafe_allow_html=True)
 
-    # Quick-reference score scale
     with st.expander("Score scale reference", expanded=False):
         st.markdown(
             "| Range | Label |\n|-------|-------|\n"
@@ -1270,12 +1530,11 @@ def main():
                 with st.expander("📈 Sentiment trend", expanded=False):
                     render_trend_chart(score_rows, target.get("name") or "")
 
-            st.markdown("## Events & sentiment")
-            st.caption(
-                "Headlines and dates for this target, with pros, cons, and voice-of-customer per event. "
-                "Use this to see what happened and what the market said about each moment."
+            st.markdown(
+                '<div class="section-head">Events &amp; Sentiment</div>'
+                '<div class="section-sub">Headlines for this target with pros, cons, and voice-of-customer per event.</div>',
+                unsafe_allow_html=True,
             )
-            st.markdown("")
             events = fetch_events_for_target(selected_id)
 
             def get_sentiment(event_id):
@@ -1291,7 +1550,7 @@ def main():
             has_summary = summary and ((summary.get("pros") or "").strip() or (summary.get("cons") or "").strip())
             if meaningful_ungrouped or has_summary:
                 st.divider()
-                st.markdown("### Company sentiment")
+                st.markdown('<div class="section-head" style="font-size:1.2rem;">Company Sentiment</div>', unsafe_allow_html=True)
                 st.caption(
                     "Sentiment for this target."
                     + (" From **target_sentiment_summary** (rule-based consolidated)." if has_summary else " From **ungrouped sentiment** rows (no summary for this target yet).")

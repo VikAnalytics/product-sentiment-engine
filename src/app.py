@@ -699,17 +699,16 @@ def _text_is_placeholder(text: str) -> bool:
     s = text.strip().lower()
     if not s:
         return True
-    # Catch any OpenAI "no signal" sentence: starts with "no " and contains a signal keyword
-    _NO_SIGNAL_KEYWORDS = ("chatter", "found", "sentiment", "quotes", "information", "mention")
-    if s.startswith("no ") and any(w in s[:120] for w in _NO_SIGNAL_KEYWORDS):
+    # Catch any OpenAI "no signal" sentence starting with "no " or "none "
+    _NO_SIGNAL_KEYWORDS = ("chatter", "found", "sentiment", "quotes", "information", "mention", "identified", "comments", "provided")
+    if (s.startswith("no ") or s.startswith("none ")) and any(w in s[:150] for w in _NO_SIGNAL_KEYWORDS):
         return True
-    # Always treat these longer boilerplate phrases as placeholders, regardless of length
+    # Always treat these phrases as placeholders, regardless of length
     for p in _LONG_PLACEHOLDER_PHRASES:
         if p in s:
             return True
-    # For the shorter phrases, only treat as placeholder when the whole field is small
     for p in _PLACEHOLDER_PHRASES:
-        if p in s and len(s) < 120:
+        if p in s:
             return True
     return False
 

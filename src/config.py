@@ -20,10 +20,11 @@ REQUEST_DELAY_BETWEEN_TARGETS_SEC = 1.0
 ARTICLES_PER_FEED = 10
 HN_SEARCH_LIMIT = 3
 REDDIT_SEARCH_LIMIT = 3
-STACKOVERFLOW_SEARCH_LIMIT = 3
 GOOGLE_NEWS_LIMIT = 3
 LOOKBACK_DAYS = 1
 MAX_PAYLOAD_CHARS_PER_FIELD = 2000  # truncate long pros/cons in report payload to avoid token limits
+MAX_CHATTER_CHARS = 3000            # truncate combined chatter before sending to AI (token savings)
+EVENT_MAX_AGE_DAYS = 14             # skip events older than this in the tracker (avoids dead HTTP calls)
 
 _supabase_client = None
 _openai_client = None

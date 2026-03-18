@@ -6,11 +6,12 @@ import logging
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta
+from logging.handlers import RotatingFileHandler
 from typing import Optional
 
 import requests
-from datetime import datetime
-from logging.handlers import RotatingFileHandler
 from sentence_transformers import SentenceTransformer
 
 # Allow importing config when running as python src/tracker.py from repo root
@@ -26,8 +27,9 @@ from config import (
     REQUEST_DELAY_BETWEEN_TARGETS_SEC,
     HN_SEARCH_LIMIT,
     REDDIT_SEARCH_LIMIT,
-    STACKOVERFLOW_SEARCH_LIMIT,
     GOOGLE_NEWS_LIMIT,
+    MAX_CHATTER_CHARS,
+    EVENT_MAX_AGE_DAYS,
 )
 
 logger = logging.getLogger(__name__)
@@ -105,7 +107,7 @@ def search_hacker_news(query: str) -> str:
         logger.debug("HN query=%r hits=%s", query, len(hits))
         comments = []
         for hit in hits:
-            raw_text = hit.get("comment_text", "") or ""
+            raw_text = (hit.get("comment_text", "") or "")[:300]
             clean_text = raw_text.replace("\n", " ").strip()
             obj_id = hit.get("objectID", "")
             item_url = f"https://news.ycombinator.com/item?id={obj_id}" if obj_id else ""
@@ -117,61 +119,30 @@ def search_hacker_news(query: str) -> str:
 
 
 def search_reddit(query: str) -> str:
-    """Fetch recent Reddit posts for the query. Returns combined text or empty string on error."""
-    formatted_query = query.replace(" ", "%20")
-    # Use api.reddit.com with a browser-like User-Agent; anonymous requests to www.reddit.com/search.json
-    # are often rate-limited or blocked with 403.
-    url = f"https://api.reddit.com/search?q={formatted_query}&sort=new&limit={REDDIT_SEARCH_LIMIT}&t=day&raw_json=1"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36",
-        "Accept": "application/json",
-    }
+    """Fetch recent Reddit posts via RSS feed (no auth required). Returns combined text or empty string on error."""
+    import feedparser
+    encoded = requests.utils.quote(query)
+    url = f"https://www.reddit.com/search.rss?q={encoded}&sort=new&t=day&limit={REDDIT_SEARCH_LIMIT}"
+    headers = {"User-Agent": "ProductSentimentEngine/1.0"}
     try:
         response = requests.get(url, headers=headers, timeout=HTTP_TIMEOUT_SEC)
         if response.status_code != 200:
-            logger.warning("Reddit returned %s for query=%r", response.status_code, query)
+            logger.warning("Reddit RSS returned %s for query=%r", response.status_code, query)
             return ""
-        children = response.json().get("data", {}).get("children", [])
-        logger.debug("Reddit query=%r children=%s", query, len(children))
-        comments = []
-        for p in children:
-            data = p.get("data", {}) or {}
-            title = data.get("title", "") or ""
-            raw_body = (data.get("selftext", "") or "")[:150]
-            clean_body = raw_body.replace("\n", " ").strip()
-            permalink = data.get("permalink", "") or ""
-            post_url = f"https://www.reddit.com{permalink}"
-            comments.append(f"{title} - {clean_body} [URL: {post_url}]")
-        return " ".join(comments) if comments else ""
-    except requests.RequestException as e:
+        feed = feedparser.parse(response.text)
+        entries = (getattr(feed, "entries", None) or [])[:REDDIT_SEARCH_LIMIT]
+        logger.debug("Reddit query=%r entries=%s", query, len(entries))
+        parts = []
+        for entry in entries:
+            title = (getattr(entry, "title", "") or "").strip()
+            summary = (getattr(entry, "summary", "") or "")[:200].replace("\n", " ").strip()
+            link = (getattr(entry, "link", "") or "").strip()
+            parts.append(f"{title} - {summary} [URL: {link}]")
+        return " ".join(parts) if parts else ""
+    except Exception as e:
         logger.warning("Reddit request failed for %s: %s", query, e)
         return ""
 
-
-def search_stackoverflow(query: str) -> str:
-    """Fetch recent Stack Overflow questions for the query. No API key needed for basic use.
-    Returns combined title+body text or empty string on error."""
-    url = (
-        f"https://api.stackexchange.com/2.3/search"
-        f"?order=desc&sort=creation&intitle={requests.utils.quote(query)}"
-        f"&site=stackoverflow&pagesize={STACKOVERFLOW_SEARCH_LIMIT}&filter=withbody"
-    )
-    try:
-        response = requests.get(url, timeout=HTTP_TIMEOUT_SEC)
-        response.raise_for_status()
-        items = response.json().get("items", [])[:STACKOVERFLOW_SEARCH_LIMIT]
-        logger.debug("StackOverflow query=%r hits=%s", query, len(items))
-        parts = []
-        for item in items:
-            title = (item.get("title") or "").strip()
-            body = (item.get("body") or "")[:300].replace("\n", " ").strip()
-            link = item.get("link") or ""
-            parts.append(f"{title} - {body} [URL: {link}]")
-        return " ".join(parts) if parts else ""
-    except requests.RequestException as e:
-        logger.warning("Stack Overflow request failed for %s: %s", query, e)
-        return ""
 
 
 def search_google_news_financial(query: str) -> str:
@@ -195,15 +166,13 @@ def search_google_news_financial(query: str) -> str:
         return ""
 
 
-def _build_source_type(hn: bool, reddit: bool, so: bool, news: bool) -> str:
+def _build_source_type(hn: bool, reddit: bool, news: bool) -> str:
     """Build a pipe-separated source type string from which sources had data."""
     active = []
     if hn:
         active.append("hn")
     if reddit:
         active.append("reddit")
-    if so:
-        active.append("stackoverflow")
     if news:
         active.append("google_news")
     if not active:
@@ -342,6 +311,8 @@ def run_tracker() -> None:
         if not events_list:
             events_list = [{"id": None, "headline": (t.get("description") or "").strip() or "(general)"}]
 
+        cutoff_dt = datetime.utcnow() - timedelta(days=EVENT_MAX_AGE_DAYS)
+
         for event in events_list:
             if max_events and events_processed >= max_events:
                 logger.info("Reached TRACKER_MAX_EVENTS=%s. Stopping early.", max_events)
@@ -349,6 +320,17 @@ def run_tracker() -> None:
 
             event_id = event.get("id")
             headline = (event.get("headline") or "").strip() or "(general)"
+
+            # E: skip events older than EVENT_MAX_AGE_DAYS (avoids dead HTTP calls on stale news)
+            raw_created = event.get("created_at") or ""
+            if raw_created and event_id is not None:
+                try:
+                    event_dt = datetime.fromisoformat(raw_created.replace("Z", "+00:00")).replace(tzinfo=None)
+                    if event_dt < cutoff_dt:
+                        logger.debug("   -> Event too old (%s), skipping: %s [%s]", raw_created[:10], name, headline[:40])
+                        continue
+                except ValueError:
+                    pass
 
             # Daily idempotency per event
             existing_q = supabase.table("sentiment").select("id").eq("target_id", t_id).gte("created_at", today_str)
@@ -360,36 +342,39 @@ def run_tracker() -> None:
             existing_data = getattr(existing, "data", None)
             if existing_data and len(existing_data) > 0:
                 logger.info("   -> Already scanned %s [%s] today. Skipping.", name, headline[:40])
-                if REQUEST_DELAY_BETWEEN_TARGETS_SEC > 0:
-                    time.sleep(REQUEST_DELAY_BETWEEN_TARGETS_SEC)
                 continue
 
             search_query = _search_query_from_context(name, target_type, headline)
             logger.info("📡 %s | %s | query=%r", name, headline[:80], search_query)
-            hn_data = search_hacker_news(search_query)
-            reddit_data = search_reddit(search_query)
-            so_data = search_stackoverflow(search_query)
-            news_data = search_google_news_financial(name)  # use bare name for financial news
+
+            # A: fetch all three sources concurrently
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                fut_hn = pool.submit(search_hacker_news, search_query)
+                fut_reddit = pool.submit(search_reddit, search_query)
+                fut_news = pool.submit(search_google_news_financial, name)
+                hn_data = fut_hn.result()
+                reddit_data = fut_reddit.result()
+                news_data = fut_news.result()
 
             combined_chatter = ""
             if hn_data:
                 combined_chatter += f"[SOURCE: Hacker News] {hn_data} "
             if reddit_data:
                 combined_chatter += f"[SOURCE: Reddit] {reddit_data} "
-            if so_data:
-                combined_chatter += f"[SOURCE: Stack Overflow] {so_data} "
             if news_data:
                 combined_chatter += f"[SOURCE: Google News Financial] {news_data}"
 
-            source_type = _build_source_type(bool(hn_data), bool(reddit_data), bool(so_data), bool(news_data))
+            # C: truncate chatter before sending to AI
+            if len(combined_chatter) > MAX_CHATTER_CHARS:
+                combined_chatter = combined_chatter[:MAX_CHATTER_CHARS]
+
+            source_type = _build_source_type(bool(hn_data), bool(reddit_data), bool(news_data))
 
             if not combined_chatter.strip():
                 logger.info(
-                    "   -> No fresh chatter (hn=%s reddit=%s so=%s news=%s).",
-                    bool(hn_data), bool(reddit_data), bool(so_data), bool(news_data),
+                    "   -> No fresh chatter (hn=%s reddit=%s news=%s).",
+                    bool(hn_data), bool(reddit_data), bool(news_data),
                 )
-                if REQUEST_DELAY_BETWEEN_TARGETS_SEC > 0:
-                    time.sleep(REQUEST_DELAY_BETWEEN_TARGETS_SEC)
                 continue
 
             events_processed += 1
@@ -426,8 +411,6 @@ def run_tracker() -> None:
                         name,
                         headline[:40],
                     )
-                    if REQUEST_DELAY_BETWEEN_TARGETS_SEC > 0:
-                        time.sleep(REQUEST_DELAY_BETWEEN_TARGETS_SEC)
                     continue
 
             tracking_context = headline

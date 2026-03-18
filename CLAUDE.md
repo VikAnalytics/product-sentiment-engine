@@ -32,12 +32,12 @@ RSS Feeds
 
 | Layer | Technology |
 |-------|-----------|
-| LLM | Google Gemini 2.5 Flash (`gemini-2.5-flash`) |
+| LLM | OpenAI `gpt-4o-mini` |
 | Embeddings | Local sentence-transformers (`all-mpnet-base-v2`, 768-dim) |
 | Database | Supabase (PostgreSQL) + pgvector extension |
 | UI | Streamlit |
 | NLP filtering | spaCy (`en_core_web_sm`) |
-| Data sources | RSS, HN Algolia API, Reddit API |
+| Data sources | RSS, HN Algolia API, Reddit RSS, Google News RSS |
 | Automation | GitHub Actions + external cron |
 
 ---
@@ -54,7 +54,7 @@ RSS Feeds
 | `src/sentiment_dedupe.py` | Text normalization + word-overlap dedupe utilities |
 | `src/consolidate_pros_cons.py` | AI-powered merging of similar pros/cons |
 | `src/normalize.py` | Target name normalization (word-order invariant) |
-| `src/domain_resolver.py` | Company name → official domain via Gemini |
+| `src/domain_resolver.py` | Company name → official domain via OpenAI |
 | `supabase/migrations/` | Schema evolution (run 000 → 007 in order) |
 | `.github/workflows/run_engine.yml` | Daily automation |
 
@@ -75,7 +75,7 @@ RSS Feeds
 
 Required in `.env` (never committed):
 ```
-GEMINI_API_KEY=...
+OPENAI_API_KEY=...
 SUPABASE_URL=...
 SUPABASE_KEY=...     # service_role key
 ```
@@ -116,14 +116,17 @@ For safe testing of tracker: `TRACKER_DRY_RUN=1 TRACKER_MAX_EVENTS=5 PYTHONPATH=
 ## Key Constants (`src/config.py`)
 
 ```python
-GEMINI_MODEL_NAME = "gemini-2.5-flash"
+OPENAI_MODEL_NAME = "gpt-4o-mini"
 EMBEDDING_MODEL = "all-mpnet-base-v2"
 MATCH_THRESHOLD = 0.82          # Vector similarity threshold for dedup
 ARTICLES_PER_FEED = 10
 HN_SEARCH_LIMIT = 3
 REDDIT_SEARCH_LIMIT = 3
+GOOGLE_NEWS_LIMIT = 3
 LOOKBACK_DAYS = 1               # Report window
 MAX_PAYLOAD_CHARS_PER_FIELD = 2000
+MAX_CHATTER_CHARS = 3000        # Truncate combined chatter before AI call (token savings)
+EVENT_MAX_AGE_DAYS = 14         # Skip events older than this in tracker
 ```
 
 ---
@@ -135,7 +138,7 @@ MAX_PAYLOAD_CHARS_PER_FIELD = 2000
 3. **Daily idempotency**: one sentiment row per (target, event) per calendar day
 4. **Text normalization**: lowercase + strip punctuation + collapse spaces
 5. **Word overlap**: 55%+ overlap = near-duplicate
-6. **AI consolidation**: Gemini merges similar bullet points
+6. **AI consolidation**: OpenAI merges similar bullet points
 
 ---
 
@@ -153,7 +156,7 @@ MAX_PAYLOAD_CHARS_PER_FIELD = 2000
 
 - API failures are logged but pipeline continues (silent fallbacks)
 - If embedding fails → skip vector dedupe, still write row
-- If Gemini rate-limits in report.py → generate mock/partial report
+- If OpenAI rate-limits in report.py → generate mock/partial report
 - Scripts use `try/except` blocks with verbose logging at each stage
 
 ---
@@ -172,10 +175,22 @@ MAX_PAYLOAD_CHARS_PER_FIELD = 2000
 
 ---
 
+## Tracker Performance Optimizations (implemented)
+
+- **Parallel HTTP fetches**: HN, Reddit, and Google News are fetched concurrently per event via `ThreadPoolExecutor(max_workers=3)` — ~3x faster than sequential
+- **Chatter truncation**: `combined_chatter` capped at `MAX_CHATTER_CHARS=3000` before the AI call (token savings)
+- **HN comment cap**: `comment_text` truncated to 300 chars, consistent with Reddit (150) and Google News (200)
+- **Old event skip**: Events older than `EVENT_MAX_AGE_DAYS=14` are skipped before any HTTP calls (avoids dead network calls on stale news)
+- **Sleep on skip paths removed**: `time.sleep()` only fires after a real API round-trip, not on already-scanned/no-chatter/vector-match skips
+- **Reddit source**: Switched from `api.reddit.com` JSON (blocked 403 since 2023) to `www.reddit.com/search.rss` via feedparser — no auth required
+- **Stack Overflow removed**: Was returning 429 consistently; removed entirely
+
+---
+
 ## Sentiment Scoring & Momentum (P1 — implemented)
 
 - **Score field**: `sentiment_score SMALLINT` added to `sentiment` table (migration `008_sentiment_score.sql`)
-- **Tracker prompt**: Gemini now outputs `PROS: ... | CONS: ... | QUOTES: ... | URL: ... | SCORE: N` (N = -10 to +10)
+- **Tracker prompt**: OpenAI now outputs JSON with keys `pros, cons, verbatim_quotes, source_url, sentiment_score, implication_tag`
 - **Parser**: `_parse_ai_sentiment_line()` handles 4-part (old) and 5-part (new) format; clamps score to [-10, +10]
 - **Dashboard badges**: Each event card shows a color-coded score pill; target hero shows current avg score + momentum vs. last 7 days
 - **Score color bands**: ≥7 green, 3–6 lime, -2–+2 gray, -6–-3 orange, ≤-7 red

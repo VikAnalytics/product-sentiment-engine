@@ -673,13 +673,13 @@ _LONG_PLACEHOLDER_PHRASES = (
     "no information found in the chatter regarding market sentiment",
     "no information on the target topic in the provided chatter",
     "no relevant quotes on the target topic in the provided chatter",
-    # OpenAI fallback patterns when no real quotes exist in the chatter
+    # OpenAI fallback patterns when no real signal exists in the chatter
     "no direct quotes",
     "no quotes directly",
     "no quotes pertaining",
-    "were found in the provided chatter",
-    "were found in the chatter",
-    "not found in the provided chatter",
+    "no relevant sentiment",
+    "found in the provided chatter",
+    "found in the chatter",
 )
 
 

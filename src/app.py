@@ -734,9 +734,11 @@ def aggregate_sentiment(sentiments: list) -> dict:
     voice = []  # list of (quote_text, source_url)
     for s in sentiments:
         for line in _to_bullet_lines(s.get("pros") or ""):
-            all_pros.append(line)
+            if not _text_is_placeholder(line):
+                all_pros.append(line)
         for line in _to_bullet_lines(s.get("cons") or ""):
-            all_cons.append(line)
+            if not _text_is_placeholder(line):
+                all_cons.append(line)
         quotes = (s.get("verbatim_quotes") or "").strip()
         url = (s.get("source_url") or "").strip()
         if quotes and not _text_is_placeholder(quotes):

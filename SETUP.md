@@ -6,7 +6,7 @@ This guide is for the team operating the engine (data/engineering). Executives c
 
 - Python 3.9+ and `virtualenv`
 - A Supabase project (Postgres + pgvector enabled)
-- A Gemini API key
+- An OpenAI API key
 
 Clone the repo and create a virtual environment:
 
@@ -25,11 +25,11 @@ Create a `.env` file in the project root:
 ```bash
 SUPABASE_URL="https://your-project.supabase.co"
 SUPABASE_KEY="your-service-role-key"
-GEMINI_API_KEY="your-gemini-api-key"
+OPENAI_API_KEY="sk-..."
 ```
 
 - `SUPABASE_KEY` should be the **service_role** key (Project Settings → API).
-- `GEMINI_API_KEY` is required for `scout.py`, `tracker.py`, and `report.py`.  
+- `OPENAI_API_KEY` is required for `scout.py`, `tracker.py`, and `report.py`.
   The dashboard itself only needs Supabase.
 
 ### 3. Apply Supabase migrations
@@ -78,7 +78,7 @@ Environment variables:
 
 - `TRACKER_DRY_RUN=1` — run everything but **do not insert** into `sentiment`.
 - `TRACKER_MAX_EVENTS=N` — stop after N `(target,event)` pairs (helpful for tests).
-- `LOG_LEVEL=DEBUG` — more detailed logs (HN/Reddit hit counts, etc.).
+- `LOG_LEVEL=DEBUG` — more detailed logs (HN/Reddit/News hit counts, etc.).
 - `LOG_FILE=logs/tracker.log` — optional rotating log file for cron / CI.
 
 #### 4.3. Generate the Market Intelligence report (Reporter)

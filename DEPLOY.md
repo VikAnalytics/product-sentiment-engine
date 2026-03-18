@@ -30,7 +30,7 @@ git push origin main
 
    Use the **service_role** key (Project Settings → API in Supabase), not the anon key, so the dashboard can read all tables. If you prefer the anon key, run migration **`006_rls_read_policies.sql`** on your project so RLS allows public read on `targets`, `events`, and `sentiment`.
 
-   The dashboard only reads from Supabase; **GEMINI_API_KEY** is not required for the app. (Scout, tracker, and report need it when you run them locally.)
+   The dashboard only reads from Supabase; **OPENAI_API_KEY** is not required for the app. (Scout, tracker, and report need it when you run them locally.)
 
 6. Click **"Deploy"**. The first run may take a few minutes (install + start).
 

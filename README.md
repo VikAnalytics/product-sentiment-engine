@@ -46,20 +46,21 @@ The engine runs in three stages, all driven by configuration in `src/config.py` 
 - **1. Scout – Discover companies, products, and events**
   - Reads RSS from TechCrunch, The Verge, Wired, Engadget, ZDNet.
   - Uses spaCy to keep only articles that match “material” concepts (launches, acquisitions, layoffs, probes, etc.).
-  - Uses Gemini to extract **targets** (companies/products) and write:
+  - Uses OpenAI to extract **targets** (companies/products) and write:
     - `targets` table: one row per company or product.
     - `events` table: one row per headline per target, with a short description.
 
 - **2. Tracker – Market sentiment per event**
-  - For each `target` + `event`, builds a focused search query and fetches recent chatter from **Hacker News** and **Reddit**.
+  - For each `target` + `event`, builds a focused search query and fetches recent chatter from **Hacker News**, **Reddit** (RSS), and **Google News Financial** — concurrently to minimize runtime.
+  - Skips events older than 14 days (no dead network calls on stale news) and truncates chatter to 3,000 chars before the AI call (token savings).
   - Embeds the combined chatter with a **local sentence‑transformer model** (no external API calls) and uses `pgvector` to run a **similarity check** (`match_sentiment`) so we only keep net-new information.
   - Adds an extra **exact‑text guard**: if an identical pros/cons/quotes triple already exists for that event, it skips writing another row (even across days or model changes).
-  - For non-duplicate chatter, prompts Gemini to output **“PROS | CONS | QUOTES | URL”** and writes one `sentiment` row linked to that `event`.
+  - For non-duplicate chatter, prompts OpenAI to return a structured JSON object (`pros`, `cons`, `verbatim_quotes`, `source_url`, `sentiment_score`, `implication_tag`) and writes one `sentiment` row linked to that `event`.
 
 - **3. Reporter – Executive report**
   - Aggregates events and sentiment for a lookback window.
   - Deduplicates repeated pros/cons and quotes.
-  - Asks Gemini to draft a report with:
+  - Asks OpenAI to draft a report with:
     - **Executive summary**,
     - **Per-target / per-event analysis**, and
     - **Forward-looking implications**.
@@ -67,7 +68,7 @@ The engine runs in three stages, all driven by configuration in `src/config.py` 
 
 ### Operations, setup, and deployment
 
-- **Setup & local runs** (cloning the repo, `.env`, Supabase, Gemini key, running `scout`, `tracker`, and `report`):
+- **Setup & local runs** (cloning the repo, `.env`, Supabase, OpenAI key, running `scout`, `tracker`, and `report`):
   - See **`SETUP.md`**.
 - **Deploying the Streamlit dashboard** (Streamlit Community Cloud):
   - See **`DEPLOY.md`**.
@@ -76,10 +77,10 @@ The engine runs in three stages, all driven by configuration in `src/config.py` 
 
 ### Technology overview
 
-- **Language**: Python 3.9+  
-- **LLM**: Google Gemini 2.5 Flash  
-- **Embeddings for dedupe**: local `sentence-transformers` model (default `all-mpnet-base-v2`) stored in `pgvector`  
-- **Database**: Supabase (PostgreSQL + `pgvector`)  
-- **UI**: Streamlit dashboard (`src/app.py`)  
-- **Automation**: GitHub Actions + external cron (or any scheduler)  
-- **Data sources**: RSS feeds, Hacker News Algolia API, Reddit API
+- **Language**: Python 3.9+
+- **LLM**: OpenAI `gpt-4o-mini`
+- **Embeddings for dedupe**: local `sentence-transformers` model (default `all-mpnet-base-v2`) stored in `pgvector`
+- **Database**: Supabase (PostgreSQL + `pgvector`)
+- **UI**: Streamlit dashboard (`src/app.py`)
+- **Automation**: GitHub Actions + external cron (or any scheduler)
+- **Data sources**: RSS feeds, Hacker News Algolia API, Reddit RSS, Google News RSS

@@ -105,16 +105,22 @@ def _inject_custom_css() -> None:
             border-radius: 14px;
             padding: 5px;
             border: none;
+            display: flex;
+            width: 100%;
         }
         .stTabs [data-baseweb="tab"] {
+            flex: 1;
+            text-align: center;
+            justify-content: center;
             border-radius: 10px;
-            padding: 8px 22px;
+            padding: 8px 0;
             font-size: 0.875rem;
             font-weight: 500;
             color: #86868B;
             border: none;
             background: transparent;
             transition: all 0.18s ease;
+            letter-spacing: 0.01em;
         }
         .stTabs [aria-selected="true"] {
             background: #FFFFFF !important;
@@ -1557,7 +1563,7 @@ def main():
     selected_id = render_sidebar(targets, st.session_state["selected_target_id"])
     st.session_state["selected_target_id"] = selected_id
 
-    tab_dive, tab_compare, tab_rank, tab_brief = st.tabs(["🔍 Deep Dive", "⚡ Compare", "🏆 Rankings", "📋 Weekly Brief"])
+    tab_dive, tab_compare, tab_rank, tab_brief = st.tabs(["Deep Dive", "Compare", "Rankings", "Weekly Brief"])
 
     with tab_dive:
         if selected_id is None:

@@ -678,8 +678,11 @@ _LONG_PLACEHOLDER_PHRASES = (
     "no quotes directly",
     "no quotes pertaining",
     "no relevant sentiment",
+    "no chatter found",
     "found in the provided chatter",
     "found in the chatter",
+    "regarding positive market sentiment",
+    "regarding negative market sentiment",
 )
 
 
@@ -689,6 +692,10 @@ def _text_is_placeholder(text: str) -> bool:
         return True
     s = text.strip().lower()
     if not s:
+        return True
+    # Catch any OpenAI "no signal" sentence: starts with "no " and contains a signal keyword
+    _NO_SIGNAL_KEYWORDS = ("chatter", "found", "sentiment", "quotes", "information", "mention")
+    if s.startswith("no ") and any(w in s[:120] for w in _NO_SIGNAL_KEYWORDS):
         return True
     # Always treat these longer boilerplate phrases as placeholders, regardless of length
     for p in _LONG_PLACEHOLDER_PHRASES:

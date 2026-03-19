@@ -2,28 +2,32 @@
 
 ## What This Project Does
 
-Automated market intelligence pipeline that:
-1. **Scouts** tech news from RSS feeds (TechCrunch, The Verge, Wired, Engadget, ZDNet)
-2. **Tracks** real customer sentiment from Hacker News + Reddit discussions
-3. **Reports** executive-ready market intelligence reports
-4. **Displays** a Streamlit dashboard for real-time monitoring
+Dual-signal market intelligence platform that:
+1. **Scouts** tech news from RSS feeds + SEC EDGAR filings (8-K, 10-Q, 10-K)
+2. **Tracks** community sentiment from Hacker News + Reddit discussions
+3. **Prices** stock reactions to each event via inter-event window attribution
+4. **Reports** executive-ready market intelligence reports
+5. **Displays** a Streamlit dashboard with sentiment scores + price reaction badges
 
-Target audience: strategy leaders who want to know how the market reacts to tech product/company news.
+Target audience: strategy leaders and investment teams who want to know what news moved markets and why.
 
 ---
 
 ## Architecture: Three-Stage Pipeline
 
 ```
-RSS Feeds
+RSS Feeds + SEC EDGAR
    ↓
-[scout.py]   → NLP filter → Gemini extracts targets + events → Supabase (targets, events)
+[scout.py]          → NLP filter → OpenAI extracts targets + events → Supabase (targets, events)
+[sec_scout.py]      → EDGAR submissions API → 8-K/10-Q/10-K filing events → Supabase (events)
    ↓
-[tracker.py] → HN + Reddit fetch → local embeddings → pgvector dedupe → Gemini sentiment → Supabase (sentiment)
+[tracker.py]        → HN + Reddit fetch → local embeddings → pgvector dedupe → OpenAI sentiment → Supabase (sentiment)
+[price_fetcher.py]  → yfinance 5-min OHLCV bars → Supabase (stock_prices)
+[price_correlator.py] → inter-event window attribution → Supabase (price_reactions)
    ↓
-[report.py]  → Aggregate + dedupe → Gemini report → reports/market_intelligence_YYYY-MM-DD.md
+[report.py]         → Aggregate + dedupe → OpenAI report → reports/market_intelligence_YYYY-MM-DD.md
    ↓
-[app.py]     → Streamlit dashboard reading from Supabase
+[app.py]            → Streamlit dashboard: sentiment + price badges + price chart overlay
 ```
 
 ---
@@ -37,7 +41,8 @@ RSS Feeds
 | Database | Supabase (PostgreSQL) + pgvector extension |
 | UI | Streamlit |
 | NLP filtering | spaCy (`en_core_web_sm`) |
-| Data sources | RSS, HN Algolia API, Reddit RSS, Google News RSS |
+| Data sources | RSS, HN Algolia API, Reddit RSS, Google News RSS, SEC EDGAR |
+| Price data | yfinance (5-min OHLCV, 59-day history, free) |
 | Automation | GitHub Actions + external cron |
 
 ---
@@ -55,19 +60,24 @@ RSS Feeds
 | `src/consolidate_pros_cons.py` | AI-powered merging of similar pros/cons |
 | `src/normalize.py` | Target name normalization (word-order invariant) |
 | `src/domain_resolver.py` | Company name → official domain via OpenAI |
-| `supabase/migrations/` | Schema evolution (run 000 → 007 in order) |
+| `src/sec_scout.py` | SEC EDGAR filing scout → events (8-K, 10-Q, 10-K, DEF 14A) |
+| `src/price_fetcher.py` | Fetch 5-min OHLCV bars via yfinance → stock_prices table |
+| `src/price_correlator.py` | Inter-event price attribution → price_reactions table |
+| `supabase/migrations/` | Schema evolution (run 000 → 013 in order) |
 | `.github/workflows/run_engine.yml` | Daily automation |
 
 ---
 
 ## Database Schema (Supabase)
 
-- **targets**: Companies/products (`id`, `name`, `target_type`, `description`, `status`, `logo_url`, `domain`, `parent_target_id`)
+- **targets**: Companies/products (`id`, `name`, `target_type`, `description`, `status`, `logo_url`, `domain`, `parent_target_id`, `ticker`)
 - **events**: News events per target (`id`, `target_id`, `headline`, `created_at`, `cached_analysis`)
 - **sentiment**: Sentiment rows with embeddings (`id`, `target_id`, `event_id`, `pros`, `cons`, `verbatim_quotes`, `source_url`, `embedding vector(768)`, `sentiment_score SMALLINT`, `created_at`)
   - `sentiment_score`: AI-assigned score from -10 (very negative) to +10 (very positive); NULL for rows before migration 008
 - **target_sentiment_summary**: AI-consolidated per-target summary (one row per target)
 - **match_sentiment**: PostgreSQL function for pgvector cosine similarity search
+- **stock_prices**: 5-min OHLCV bars per target (`target_id`, `ts`, `open`, `high`, `low`, `close`, `volume`)
+- **price_reactions**: Inter-event attribution per event (`event_id`, `ticker`, `price_at_event`, `window_return_pct`, `reaction_1d/3d/7d`, `market_session`, `confidence`, `confidence_reason`)
 
 ---
 
@@ -258,3 +268,14 @@ EVENT_MAX_AGE_DAYS = 14         # Skip events older than this in tracker
 - Uses `st.cache_data` for DB queries
 - Optional: `streamlit-searchbox` for faster target navigation
 - Deployed to Streamlit Cloud using `requirements-app.txt` (lighter dependency set)
+
+## Price Intelligence Layer (implemented)
+
+- **Migrations**: `011_ticker.sql` (ticker on targets), `012_stock_prices.sql`, `013_price_reactions.sql`
+- **Tickers**: 52 targets have tickers set (public companies + subsidiaries sharing parent ticker); private companies have NULL ticker
+- **`price_fetcher.py`**: Downloads 59 days of 5-min OHLCV bars via yfinance for all targets with a ticker; upserts into `stock_prices`; deduplicates by ticker to avoid fetching the same company twice for subsidiaries
+- **`price_correlator.py`**: For each event on a public company, computes: `price_at_event` (close at nearest 5-min bar), `window_return_pct` (inter-event: price at this event → next event or market close), `reaction_1d/3d/7d` (broader context), `confidence` (high/medium/low based on event isolation within ±3h), `market_session` (regular/premarket/afterhours — afterhours events shift attribution to next market open)
+- **`sec_scout.py`**: Polls EDGAR submissions API (`data.sec.gov/submissions/CIK{}.json`) for 8-K, 10-Q, 10-K, DEF 14A filings filed in last 7 days; uses `company_tickers.json` for ticker→CIK mapping; inserts filing events with `[FORM_TYPE] Company — date SEC filing` headline; idempotent via exact headline match
+- **Dashboard**: Event cards show price reaction badges (inter-event %, 1d/3d/7d %, confidence label) for public company events; Deep Dive tab has a collapsible "Price Chart — TICKER" expander with Altair line chart + orange event markers; private companies show no price section
+- **GitHub Actions**: `sec_scout.py`, `price_fetcher.py`, `price_correlator.py` added to daily pipeline after `scout.py` and before `report.py`
+- **Attribution model**: Probabilistic correlation (not causation) — each event "owns" the price move until the next event or market close; confidence degrades when multiple events cluster within 3 hours or when the move is during premarket/afterhours

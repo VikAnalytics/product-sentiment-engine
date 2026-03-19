@@ -35,9 +35,12 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
-          python src/scout.py
-          python src/tracker.py
-          python src/report.py
+          PYTHONPATH=src python src/scout.py
+          PYTHONPATH=src python src/sec_scout.py
+          PYTHONPATH=src python src/tracker.py
+          PYTHONPATH=src python src/price_fetcher.py
+          PYTHONPATH=src python src/price_correlator.py
+          PYTHONPATH=src python src/report.py
 
       - name: Run Weekly Brief (Mondays only)
         if: github.event_name == 'schedule'
@@ -46,7 +49,7 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
-          python src/weekly_brief.py
+          PYTHONPATH=src python src/weekly_brief.py
 
       - name: Save Reports to GitHub
         run: |

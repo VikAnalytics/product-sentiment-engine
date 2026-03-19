@@ -591,6 +591,49 @@ def fetch_sentiment_for_target_ungrouped(target_id: Optional[int]):
     return getattr(resp, "data", None) or []
 
 
+@st.cache_data(ttl=300)
+def fetch_price_reaction(event_id: Optional[int]) -> Optional[dict]:
+    """Fetch price reaction row for an event. Returns None if no ticker / no data."""
+    if event_id is None:
+        return None
+    supabase = get_supabase()
+    resp = (
+        supabase.table("price_reactions")
+        .select("ticker, price_at_event, window_return_pct, reaction_1d, reaction_3d, reaction_7d, market_session, confidence, confidence_reason")
+        .eq("event_id", event_id)
+        .limit(1)
+        .execute()
+    )
+    rows = getattr(resp, "data", None) or []
+    return rows[0] if rows else None
+
+
+@st.cache_data(ttl=300)
+def fetch_price_series(target_id: Optional[int], days: int = 30) -> list:
+    """Fetch daily close prices for the price chart (last N days, last bar per day)."""
+    if target_id is None:
+        return []
+    from datetime import timezone as _tz
+    cutoff = (datetime.now(_tz.utc) - timedelta(days=days)).isoformat()
+    supabase = get_supabase()
+    resp = (
+        supabase.table("stock_prices")
+        .select("ts, close")
+        .eq("target_id", target_id)
+        .gte("ts", cutoff)
+        .order("ts", desc=False)
+        .limit(10000)
+        .execute()
+    )
+    rows = getattr(resp, "data", None) or []
+    # Collapse to one close per day (last bar of day)
+    by_date: dict = {}
+    for r in rows:
+        day = r["ts"][:10]
+        by_date[day] = r["close"]
+    return [{"date": d, "close": c} for d, c in sorted(by_date.items())]
+
+
 def fetch_all_sentiment_scores_for_target(target_id: Optional[int]) -> list:
     """Fetch all (created_at, sentiment_score) rows for a target to compute momentum."""
     if target_id is None:
@@ -1045,8 +1088,35 @@ def render_event_card(event: dict, sentiments: list) -> None:
         if source_label:
             badges.append(f'<span class="pcc-source-caption">Sources: {_he(source_label)}</span>')
 
+        # ── Price reaction badges (public companies only) ──────────
+        pr = fetch_price_reaction(event.get("id"))
+        price_badges = []
+        if pr and pr.get("price_at_event"):
+            p0 = pr["price_at_event"]
+            ticker = pr.get("ticker", "")
+            price_badges.append(f'<span class="pcc-source-caption" style="font-weight:600;">{ticker} ${p0:.2f}</span>')
+            for label, key in [("inter-event", "window_return_pct"), ("1d", "reaction_1d"), ("3d", "reaction_3d"), ("7d", "reaction_7d")]:
+                val = pr.get(key)
+                if val is not None:
+                    clr = "#1a7f37" if val > 0 else ("#cf222e" if val < 0 else "#6e7781")
+                    sign = "+" if val > 0 else ""
+                    price_badges.append(
+                        f'<span class="score-pill" style="background:{clr};color:#fff;font-size:0.72rem;">'
+                        f'{label}: {sign}{val:.2f}%</span>'
+                    )
+            conf = pr.get("confidence", "")
+            if conf:
+                conf_clr = {"high": "#0071E3", "medium": "#6e7781", "low": "#cf222e"}.get(conf, "#6e7781")
+                price_badges.append(
+                    f'<span class="pcc-source-caption" style="color:{conf_clr};">attribution: {conf}</span>'
+                )
+
+        all_badges_html = "".join(badges)
+        if price_badges:
+            all_badges_html += '<span style="margin-left:12px;border-left:1px solid #d2d2d7;padding-left:12px;">' + "".join(price_badges) + "</span>"
+
         st.markdown(
-            f'<div class="pcc-badge-row">{"".join(badges)}</div>',
+            f'<div class="pcc-badge-row">{all_badges_html}</div>',
             unsafe_allow_html=True,
         )
 
@@ -1257,6 +1327,77 @@ def _build_score_timeseries(score_rows: list, lookback_days: int) -> "pd.DataFra
     daily["rolling_avg"] = daily["score"].rolling(window=7, min_periods=1).mean().round(1)
     daily["score"] = daily["score"].round(1)
     return daily
+
+
+def _render_price_chart(target_id: int, target: dict, events: list) -> None:
+    """Price chart with event markers for public companies."""
+    try:
+        import altair as alt
+        import pandas as pd
+    except ImportError:
+        st.caption("_Chart library not available._")
+        return
+
+    ticker = target.get("ticker", "")
+    window = st.radio("Window", ["30d", "59d"], horizontal=True, key=f"price_win_{target_id}")
+    days = 30 if window == "30d" else 59
+
+    price_rows = fetch_price_series(target_id, days)
+    if not price_rows:
+        st.caption(f"_No price data yet for {ticker}. Run price_fetcher.py to populate._")
+        return
+
+    df = pd.DataFrame(price_rows)
+    df["date"] = pd.to_datetime(df["date"])
+
+    # Build event markers: one dot per event that falls in window
+    cutoff_dt = df["date"].min()
+    event_markers = []
+    for e in events:
+        ts = e.get("created_at", "")
+        if not ts:
+            continue
+        try:
+            dt = pd.to_datetime(ts[:10])
+        except Exception:
+            continue
+        if dt >= cutoff_dt:
+            event_markers.append({"date": dt, "headline": (e.get("headline") or "")[:60]})
+
+    line = (
+        alt.Chart(df)
+        .mark_line(color="#0071E3", strokeWidth=2)
+        .encode(
+            x=alt.X("date:T", axis=alt.Axis(format="%b %d", labelAngle=-30, title="")),
+            y=alt.Y("close:Q", scale=alt.Scale(zero=False), axis=alt.Axis(title=f"{ticker} close ($)")),
+            tooltip=[alt.Tooltip("date:T", format="%b %d %Y"), alt.Tooltip("close:Q", title="Close", format="$.2f")],
+        )
+    )
+
+    chart = line
+    if event_markers:
+        df_ev = pd.DataFrame(event_markers)
+        dots = (
+            alt.Chart(df_ev)
+            .mark_point(shape="triangle-up", size=80, filled=True, color="#FF9F0A")
+            .encode(
+                x=alt.X("date:T"),
+                y=alt.value(20),
+                tooltip=[alt.Tooltip("date:T", format="%b %d %Y"), alt.Tooltip("headline:N", title="Event")],
+            )
+        )
+        chart = alt.layer(line, dots)
+
+    st.altair_chart(
+        chart.properties(height=280, background="transparent")
+        .configure_view(strokeWidth=0)
+        .configure_axis(grid=True, gridColor="#f0f0f0"),
+        use_container_width=True,
+    )
+    if event_markers:
+        st.caption(f"{ticker} daily close · orange markers = tracked events · {len(event_markers)} events in window")
+    else:
+        st.caption(f"{ticker} daily close · {days}-day window")
 
 
 def render_trend_chart(score_rows: list, target_name: str) -> None:
@@ -1573,8 +1714,13 @@ def main():
             render_target_overview(target, score_rows)
 
             if score_rows:
-                with st.expander("📈 Sentiment trend", expanded=False):
+                with st.expander("Sentiment Trend", expanded=False):
                     render_trend_chart(score_rows, target.get("name") or "")
+
+            # Price chart (public companies only)
+            if target and target.get("ticker"):
+                with st.expander(f"Price Chart — {target['ticker']}", expanded=False):
+                    _render_price_chart(selected_id, target, fetch_events_for_target(selected_id))
 
             st.markdown(
                 '<div class="section-head">Events &amp; Sentiment</div>'

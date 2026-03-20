@@ -40,7 +40,7 @@ git push origin main
 
 ## 3. Apply Supabase Migrations
 
-Before the dashboard loads correctly, all migrations in `supabase/migrations/` (`000` through `014`) must be applied to your Supabase project. See [supabase/README.md](supabase/README.md).
+Before the dashboard loads correctly, all migrations in `supabase/migrations/` (`000` through `014`) must be applied to your Supabase project. See [supabase/README.md](../supabase/README.md).
 
 Migration `006_rls_read_policies.sql` is required if you are using the anon key.
 

@@ -127,7 +127,6 @@ RSS Feeds + SEC EDGAR
 
 | Document | Contents |
 |----------|---------|
-| [SETUP.md](SETUP.md) | Local setup, environment variables, running the pipeline |
-| [DEPLOY.md](DEPLOY.md) | Deploying the Streamlit dashboard to Streamlit Community Cloud |
-| [TECHNICAL_REFERENCE.md](TECHNICAL_REFERENCE.md) | Deep-dive architecture, design decisions, engineering problems solved |
+| [docs/SETUP.md](docs/SETUP.md) | Local setup, environment variables, running the pipeline |
+| [docs/DEPLOY.md](docs/DEPLOY.md) | Deploying the Streamlit dashboard to Streamlit Community Cloud |
 | [supabase/README.md](supabase/README.md) | Database schema and migration guide |

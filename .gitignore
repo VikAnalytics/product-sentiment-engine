@@ -3,4 +3,4 @@ venv/
 .DS_Store
 *.pyc
 __pycache__/
-TECHNICAL_REFERENCE.md
+docs/TECHNICAL_REFERENCE.md

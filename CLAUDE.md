@@ -268,7 +268,7 @@ REPORT_EVENT_MAX_AGE_DAYS = 3  # Only include events created within last 3 days 
 - Filters out placeholder strings: "None identified", "No pros mentioned", etc.
 - Uses `st.cache_data` for DB queries
 - Optional: `streamlit-searchbox` for faster target navigation
-- Deployed to Streamlit Cloud using `requirements-app.txt` (lighter dependency set)
+- Deployed to Streamlit Cloud using `src/requirements.txt` (lighter dependency set; Streamlit Cloud auto-detects this when entrypoint is `src/app.py`)
 
 ## Price Intelligence Layer (implemented)
 

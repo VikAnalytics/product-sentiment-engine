@@ -52,7 +52,7 @@ REPORTS_DIR=/abs/path/        # default: reports/
 
 ## 3. Apply Supabase Migrations
 
-In the Supabase SQL Editor (or via `supabase db push`), apply all files under `supabase/migrations/` in numeric order — `000` through `014`. See [supabase/README.md](supabase/README.md) for the full list and what each migration does.
+In the Supabase SQL Editor (or via `supabase db push`), apply all files under `supabase/migrations/` in numeric order — `000` through `014`. See [supabase/README.md](../supabase/README.md) for the full list and what each migration does.
 
 ---
 
@@ -145,7 +145,7 @@ PYTHONPATH=src python src/weekly_brief.py
 PYTHONPATH=src streamlit run src/app.py
 ```
 
-Requires `SUPABASE_URL` and `SUPABASE_KEY` in `.env`. For deployment to Streamlit Community Cloud, see [DEPLOY.md](DEPLOY.md).
+Requires `SUPABASE_URL` and `SUPABASE_KEY` in `.env`. For deployment to Streamlit Community Cloud, see [DEPLOY.md](DEPLOY.md) (same folder).
 
 ---
 

@@ -1,86 +1,133 @@
-## Product Sentiment Engine
+# Product Sentiment Engine
 
-### Who this is for
+A dual-signal market intelligence platform for strategy leaders and investment teams.
 
-This repo is designed for **Strategy Leaders** who want a *single place* to see:
+---
 
-- **What changed** for your companies and products (news events).
-- **How the market reacted** (pros, cons, and real customer quotes).
-- **What to do about it** (executive-ready written reports).
+## Who This Is For
 
-You should be able to open the dashboard and answer, in minutes, questions like:
+**Strategy leaders** who want a single place to answer questions like:
 
-- “What are the last 3 meaningful events for Nvidia and Anthropic?”  
-- “Is sentiment getting better or worse, and why?”  
-- “Where is the market actually complaining (pricing, performance, trust, UX)?”
+- "What are the last 3 meaningful events for Nvidia and Anthropic?"
+- "Is sentiment getting better or worse, and why?"
+- "Where is the market actually complaining — pricing, performance, trust, UX?"
+- "How did the stock price react when that announcement dropped?"
 
-The underlying system is fully transparent and auditable; every insight can be traced back to specific HN/Reddit threads or articles.
+Every insight is traceable to a specific HN thread, Reddit post, or SEC filing.
 
-### What the system does
+---
 
-- **Ingests tech news** from top RSS feeds and turns each headline into a structured **event** for a company or product.
-- **Scans public chatter** (Hacker News + Reddit) around each event and keeps only *non-duplicative* signals.
-- **Extracts sentiment** as:
-  - **Pros**: what the market likes.
-  - **Cons**: what the market criticizes.
-  - **Voice of the customer**: verbatim quotes with source links.
-- **Surfaces intelligence** in two ways:
-  - A **Streamlit dashboard** for day-to-day monitoring (events timeline + company sentiment).
-  - A written **Market Intelligence Report** for board decks and IC memos.
+## What the System Does
 
-### How to use the dashboard (executive view)
+| Signal | Source | Output |
+|--------|--------|--------|
+| News events | RSS feeds + SEC EDGAR (8-K, 10-Q, 10-K) | Structured events per company/product |
+| Community sentiment | Hacker News + Reddit | Pros, cons, verbatim quotes with source links |
+| Stock price reactions | yfinance 5-min OHLCV bars | Inter-event price attribution per event |
+| Structured intelligence | OpenAI `gpt-4o-mini` | Daily reports + weekly executive brief |
 
-1. Open the deployed Streamlit app (or run it locally with `streamlit run src/app.py`).
-2. Use the **sidebar** to select a company or product.
-3. For the selected target you will see:
-   - **Events & sentiment**: a timeline of recent events; expand each to see pros, cons, and customer quotes.
-   - **Company sentiment**: consolidated, deduplicated pros/cons and source links not tied to a specific event.
-4. When there is no real signal for an event, the dashboard explicitly shows **“No new chatter for this event.”**
+Surfaces through two outputs:
 
-If you only care about consuming insights, you can stop here. The rest of the documentation is for the team operating the system.
+- **Streamlit dashboard** — events timeline, sentiment scores, price reaction badges, news feed, competitive rankings
+- **Market Intelligence Report** — board-ready markdown written daily, stored in `reports/`
 
-### How it works (one-page architecture)
+---
 
-The engine runs in three stages, all driven by configuration in `src/config.py` and a Supabase/Postgres schema under `supabase/migrations/`:
+## How to Use the Dashboard
 
-- **1. Scout – Discover companies, products, and events**
-  - Reads RSS from TechCrunch, The Verge, Wired, Engadget, ZDNet.
-  - Uses spaCy to keep only articles that match “material” concepts (launches, acquisitions, layoffs, probes, etc.).
-  - Uses OpenAI to extract **targets** (companies/products) and write:
-    - `targets` table: one row per company or product.
-    - `events` table: one row per headline per target, with a short description.
+1. Open the deployed Streamlit app (or run locally — see [SETUP.md](SETUP.md)).
+2. Use the **sidebar** to navigate:
+   - **News Feed** — chronological view of all tracked headlines; filter by date and sector
+   - **Analysis** — deep dive into a specific company or product
+3. In Analysis mode, select a company or product to see:
+   - Events timeline with sentiment scores and implication tags (threat / opportunity / monitor)
+   - Price reaction badges for public companies (inter-event %, 1d/3d/7d)
+   - Collapsible price chart with event markers
+   - Sentiment trend chart (30 / 90 / all-time)
+4. Use **Compare** to put up to 4 targets side by side.
+5. Use **Rankings** to see all companies ranked by average sentiment score.
 
-- **2. Tracker – Market sentiment per event**
-  - For each `target` + `event`, builds a focused search query and fetches recent chatter from **Hacker News**, **Reddit** (RSS), and **Google News Financial** — concurrently to minimize runtime.
-  - Skips events older than 14 days (no dead network calls on stale news) and truncates chatter to 3,000 chars before the AI call (token savings).
-  - Embeds the combined chatter with a **local sentence‑transformer model** (no external API calls) and uses `pgvector` to run a **similarity check** (`match_sentiment`) so we only keep net-new information.
-  - Adds an extra **exact‑text guard**: if an identical pros/cons/quotes triple already exists for that event, it skips writing another row (even across days or model changes).
-  - For non-duplicate chatter, prompts OpenAI to return a structured JSON object (`pros`, `cons`, `verbatim_quotes`, `source_url`, `sentiment_score`, `implication_tag`) and writes one `sentiment` row linked to that `event`.
+If you only need to consume insights, you can stop here. The rest of this documentation is for the team running the system.
 
-- **3. Reporter – Executive report**
-  - Aggregates events and sentiment for a lookback window.
-  - Deduplicates repeated pros/cons and quotes.
-  - Asks OpenAI to draft a report with:
-    - **Executive summary**,
-    - **Per-target / per-event analysis**, and
-    - **Forward-looking implications**.
-  - Saves to `reports/market_intelligence_YYYY-MM-DD.md`.
+---
 
-### Operations, setup, and deployment
+## Architecture
 
-- **Setup & local runs** (cloning the repo, `.env`, Supabase, OpenAI key, running `scout`, `tracker`, and `report`):
-  - See **`SETUP.md`**.
-- **Deploying the Streamlit dashboard** (Streamlit Community Cloud):
-  - See **`DEPLOY.md`**.
-- **Supabase schema** (tables, RLS, and functions):
-  - See SQL migrations under **`supabase/migrations/`**.
+```
+RSS Feeds + SEC EDGAR
+        ↓
+   scout.py          NLP filter → OpenAI extracts targets + events → Supabase
+   sec_scout.py      EDGAR submissions API → 8-K/10-Q/10-K events → Supabase
+        ↓
+   tracker.py        HN + Reddit → local embeddings → pgvector dedupe → OpenAI sentiment → Supabase
+   price_fetcher.py  yfinance 5-min OHLCV bars → Supabase
+   price_correlator.py  Inter-event window attribution → Supabase
+        ↓
+   report.py         Aggregate + dedupe → OpenAI → reports/market_intelligence_YYYY-MM-DD.md
+   weekly_brief.py   7-day strategic synthesis → reports/weekly_brief_YYYY-WXX.md
+        ↓
+   app.py            Streamlit dashboard
+```
 
-### Technology overview
+---
 
-- **Language**: Python 3.9+
-- **LLM**: OpenAI `gpt-4o-mini`
-- **Embeddings for dedupe**: local `sentence-transformers` model (default `all-mpnet-base-v2`) stored in `pgvector`
-- **Database**: Supabase (PostgreSQL + `pgvector`)
-- **UI**: Streamlit dashboard (`src/app.py`)
-- **Automation**: GitHub Actions + external cron (or any scheduler)
-- **Data sources**: RSS feeds, Hacker News Algolia API, Reddit RSS, Google News RSS
+## How It Works
+
+### 1. Scout — Discover companies, products, and events
+
+- Reads RSS from TechCrunch, The Verge, Wired, Reuters, Yahoo Finance, and others
+- Uses spaCy to keep only articles that match material concepts (launches, acquisitions, layoffs, earnings, regulatory probes, etc.) — eliminates ~60% of articles before any LLM call
+- Uses OpenAI to extract the company/product name and write structured rows into `targets` and `events`
+
+### 2. SEC Scout — EDGAR filing events
+
+- Polls EDGAR's submissions API for each tracked public company
+- Inserts 8-K, 10-Q, 10-K, and DEF 14A filings as events (no API key required)
+- Idempotent: exact headline match check before inserting
+
+### 3. Tracker — Market sentiment per event
+
+- For each event (last 14 days), fetches chatter from Hacker News and Reddit concurrently
+- Generates 768-dim embeddings locally (no API call) and runs a `pgvector` cosine similarity check — skips anything above 0.82 similarity threshold
+- Additional exact-text guard: skips identical (pros, cons, quotes) triples even across days
+- For net-new chatter, prompts OpenAI (JSON mode) to return: `pros`, `cons`, `verbatim_quotes`, `source_url`, `sentiment_score` (−10 to +10), `implication_tag`
+
+### 4. Price Intelligence
+
+- **price_fetcher.py** downloads 59 days of 5-min OHLCV bars from yfinance for all public company targets
+- **price_correlator.py** computes inter-event attribution: each event "owns" the price move from its timestamp to the next event or market close
+- Confidence scoring based on event clustering density (±3h window)
+- After-hours events shift attribution to the next regular market open
+
+### 5. Reports
+
+- **Daily report** aggregates the last 24h of sentiment, deduplicates repeated points, and prompts OpenAI to write a professional Market Intelligence Report
+- **Weekly brief** (Mondays) is a 7-day strategic synthesis covering opportunities, risks, competitive shifts, and recommended actions
+
+---
+
+## Technology
+
+| Layer | Technology |
+|-------|-----------|
+| LLM | OpenAI `gpt-4o-mini` |
+| Embeddings | `sentence-transformers/all-mpnet-base-v2` (local, 768-dim) |
+| Vector search | pgvector `<=>` cosine operator |
+| Database | Supabase (PostgreSQL + pgvector) |
+| Price data | yfinance (5-min bars, 59-day history, no key needed) |
+| SEC filings | EDGAR submissions API (no auth required) |
+| NLP filtering | spaCy `en_core_web_sm` |
+| Dashboard | Streamlit |
+| Charts | Altair (interactive, layered) |
+| Automation | GitHub Actions + cron-job.org |
+
+---
+
+## Further Reading
+
+| Document | Contents |
+|----------|---------|
+| [SETUP.md](SETUP.md) | Local setup, environment variables, running the pipeline |
+| [DEPLOY.md](DEPLOY.md) | Deploying the Streamlit dashboard to Streamlit Community Cloud |
+| [TECHNICAL_REFERENCE.md](TECHNICAL_REFERENCE.md) | Deep-dive architecture, design decisions, engineering problems solved |
+| [supabase/README.md](supabase/README.md) | Database schema and migration guide |

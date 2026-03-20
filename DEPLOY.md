@@ -1,58 +1,77 @@
-# Deploy the Streamlit dashboard
+# Deploying the Dashboard
 
-Deploy to **Streamlit Community Cloud** (free) so the dashboard is available online.
+Deploy to **Streamlit Community Cloud** (free tier) so the dashboard is accessible online.
 
-## 1. Push your code to GitHub
+---
+
+## 1. Push Code to GitHub
 
 Ensure your repo is on GitHub and up to date:
 
 ```bash
-git add .
-git commit -m "Prepare Streamlit deploy"
 git push origin main
 ```
 
+---
+
 ## 2. Deploy on Streamlit Community Cloud
 
-1. Go to **[share.streamlit.io](https://share.streamlit.io)** and sign in with GitHub.
-2. Click **"New app"**.
-3. **Repository:** `your-username/product-sentiment-engine`  
-   **Branch:** `main`  
-   **Main file path:** `src/app.py`
-4. Click **"Advanced settings"** and set **Python version** to 3.9 or 3.11.  
-   Because your main file is `src/app.py`, Streamlit Cloud will look for dependencies in `src/` first and use **`src/requirements.txt`** (dashboard-only, fast install). No need to change the requirements path.
-5. Add **Secrets** (same page or in app **Settings → Secrets**):
+1. Go to [share.streamlit.io](https://share.streamlit.io) and sign in with GitHub.
+2. Click **New app**.
+3. Set the following:
+   - **Repository:** `VikAnalytics/product-sentiment-engine`
+   - **Branch:** `main`
+   - **Main file path:** `src/app.py`
+4. Click **Advanced settings** and set **Python version** to `3.11`.
+5. Add secrets (same page, or later via app **Settings → Secrets**):
 
    ```toml
    SUPABASE_URL = "https://your-project.supabase.co"
    SUPABASE_KEY = "your-service-role-key"
    ```
 
-   Use the **service_role** key (Project Settings → API in Supabase), not the anon key, so the dashboard can read all tables. If you prefer the anon key, run migration **`006_rls_read_policies.sql`** on your project so RLS allows public read on `targets`, `events`, and `sentiment`.
+   Use the **service_role** key. The dashboard is read-only — it never writes to Supabase — so service_role is safe and avoids RLS issues. If you prefer the anon key, apply migration `006_rls_read_policies.sql` first.
 
-   The dashboard only reads from Supabase; **OPENAI_API_KEY** is not required for the app. (Scout, tracker, and report need it when you run them locally.)
+   `OPENAI_API_KEY` is **not** required for the dashboard.
 
-6. Click **"Deploy"**. The first run may take a few minutes (install + start).
+6. Click **Deploy**. First boot takes a few minutes (install + model download).
 
-## 3. Supabase migrations
+---
 
-Ensure all migrations in `supabase/migrations/` have been applied to your Supabase project (Dashboard → SQL Editor, or `supabase db push`). In particular, **`006_rls_read_policies.sql`** adds read policies so the app can load targets and events; without it, the request may fail with an API error if RLS is enabled and no policies exist.
+## 3. Apply Supabase Migrations
 
-## 4. After deploy
+Before the dashboard loads correctly, all migrations in `supabase/migrations/` (`000` through `014`) must be applied to your Supabase project. See [supabase/README.md](supabase/README.md).
+
+Migration `006_rls_read_policies.sql` is required if you are using the anon key.
+
+---
+
+## 4. After Deployment
 
 - Your app will be at `https://your-app-name.streamlit.app`.
-- To update: push to the same branch; Streamlit Cloud will redeploy.
+- To update: push to `main` — Streamlit Cloud redeploys automatically.
 - To change secrets or settings: open the app on share.streamlit.io → **Settings**.
 
-## 5. If you see a redacted "APIError" on the app
+---
 
-- **Push the latest code and redeploy.** The app includes an error handler that shows the real Supabase message (code, message, details) instead of a redacted one. If the traceback points to `targets = fetch_targets()` around line 671 with no try/except, the deployed build is old — push, wait for redeploy, then reload the app to see the actual error.
-- **Check Streamlit secrets format** (Settings → Secrets):
-  - Use TOML: `SUPABASE_URL = "https://..."` and `SUPABASE_KEY = "eyJ..."` (quotes allowed).
-  - Paste the **entire** service_role key with no leading/trailing spaces or newlines.
-  - Ensure the key is from the same Supabase project as the URL.
+## 5. Troubleshooting
 
-## Note on dependencies
+### White-on-white dropdowns or wrong colors
 
-- **Streamlit Community Cloud** uses `src/requirements.txt` when the app path is `src/app.py` (dashboard-only deps → faster deploy).
-- **Local runs** use the root `requirements.txt` (full pipeline: scout, tracker, report).
+The app uses a dark theme. Ensure `.streamlit/config.toml` contains `base = "dark"`. If it reverts to `base = "light"`, native Streamlit components (dropdowns, selectboxes) will render with white text on a white background.
+
+### API error on first load
+
+- Verify the `SUPABASE_URL` and `SUPABASE_KEY` secrets are set correctly in Streamlit Cloud (Settings → Secrets).
+- Paste the full service_role key with no leading/trailing whitespace.
+- Confirm the key belongs to the same Supabase project as the URL.
+
+### Stale build after a code push
+
+Streamlit Cloud may serve a cached build. Force a redeploy from the app dashboard (three-dot menu → **Reboot app**).
+
+---
+
+## Note on Dependencies
+
+Streamlit Community Cloud resolves dependencies from `src/requirements.txt` when the main file path is `src/app.py`. This is a lighter set (dashboard-only) compared to the root `requirements.txt` (full pipeline including spaCy, sentence-transformers, yfinance). This keeps dashboard deploys fast.

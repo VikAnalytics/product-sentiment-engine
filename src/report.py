@@ -12,7 +12,7 @@ _src_dir = os.path.dirname(os.path.abspath(__file__))
 if _src_dir not in sys.path:
     sys.path.insert(0, _src_dir)
 
-from config import get_supabase, get_model, LOOKBACK_DAYS, MAX_PAYLOAD_CHARS_PER_FIELD
+from config import get_supabase, get_model, LOOKBACK_DAYS, MAX_PAYLOAD_CHARS_PER_FIELD, REPORT_EVENT_MAX_AGE_DAYS
 from sentiment_dedupe import normalize_for_dedupe
 
 logger = logging.getLogger(__name__)
@@ -66,6 +66,8 @@ def get_cloud_data():
 
     yesterday_dt = datetime.utcnow() - timedelta(days=LOOKBACK_DAYS)
     yesterday_str = yesterday_dt.isoformat()
+    event_cutoff_dt = datetime.utcnow() - timedelta(days=REPORT_EVENT_MAX_AGE_DAYS)
+    event_cutoff_str = event_cutoff_dt.isoformat()
     full_data = []
 
     for t in targets:
@@ -75,8 +77,10 @@ def get_cloud_data():
         if t_id is None:
             continue
 
-        # Get events for this target; if none (legacy), use one virtual event from target.description
-        events_resp = supabase.table("events").select("*").eq("target_id", t_id).execute()
+        # Get events for this target created within the last REPORT_EVENT_MAX_AGE_DAYS days only.
+        # This prevents old events (e.g. March 7) from resurfacing in today's report just because
+        # the tracker wrote fresh sentiment rows for them.
+        events_resp = supabase.table("events").select("*").eq("target_id", t_id).gte("created_at", event_cutoff_str).execute()
         events_list = getattr(events_resp, "data", None) or []
         if not events_list:
             events_list = [{"id": None, "headline": t.get("description") or ""}]

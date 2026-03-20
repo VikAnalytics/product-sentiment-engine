@@ -63,14 +63,14 @@ RSS Feeds + SEC EDGAR
 | `src/sec_scout.py` | SEC EDGAR filing scout → events (8-K, 10-Q, 10-K, DEF 14A) |
 | `src/price_fetcher.py` | Fetch 5-min OHLCV bars via yfinance → stock_prices table |
 | `src/price_correlator.py` | Inter-event price attribution → price_reactions table |
-| `supabase/migrations/` | Schema evolution (run 000 → 013 in order) |
+| `supabase/migrations/` | Schema evolution (run 000 → 014 in order) |
 | `.github/workflows/run_engine.yml` | Daily automation |
 
 ---
 
 ## Database Schema (Supabase)
 
-- **targets**: Companies/products (`id`, `name`, `target_type`, `description`, `status`, `logo_url`, `domain`, `parent_target_id`, `ticker`)
+- **targets**: Companies/products (`id`, `name`, `target_type`, `description`, `status`, `logo_url`, `domain`, `parent_target_id`, `ticker`, `sector`, `is_f500`)
 - **events**: News events per target (`id`, `target_id`, `headline`, `created_at`, `cached_analysis`)
 - **sentiment**: Sentiment rows with embeddings (`id`, `target_id`, `event_id`, `pros`, `cons`, `verbatim_quotes`, `source_url`, `embedding vector(768)`, `sentiment_score SMALLINT`, `created_at`)
   - `sentiment_score`: AI-assigned score from -10 (very negative) to +10 (very positive); NULL for rows before migration 008
@@ -137,6 +137,7 @@ LOOKBACK_DAYS = 1               # Report window
 MAX_PAYLOAD_CHARS_PER_FIELD = 2000
 MAX_CHATTER_CHARS = 3000        # Truncate combined chatter before AI call (token savings)
 EVENT_MAX_AGE_DAYS = 14         # Skip events older than this in tracker
+REPORT_EVENT_MAX_AGE_DAYS = 3  # Only include events created within last 3 days in daily report
 ```
 
 ---
@@ -279,3 +280,31 @@ EVENT_MAX_AGE_DAYS = 14         # Skip events older than this in tracker
 - **Dashboard**: Event cards show price reaction badges (inter-event %, 1d/3d/7d %, confidence label) for public company events; Deep Dive tab has a collapsible "Price Chart — TICKER" expander with Altair line chart + orange event markers; private companies show no price section
 - **GitHub Actions**: `sec_scout.py`, `price_fetcher.py`, `price_correlator.py` added to daily pipeline after `scout.py` and before `report.py`
 - **Attribution model**: Probabilistic correlation (not causation) — each event "owns" the price move until the next event or market close; confidence degrades when multiple events cluster within 3 hours or when the move is during premarket/afterhours
+- **Price chart pagination**: `fetch_price_series()` paginates in 1000-row pages via `.range()` to bypass Supabase's default PostgREST row cap — critical for 59d window (~4600 bars)
+- **Event markers**: positioned at actual close price on the event date (`y=alt.Y("close:Q")`) — not a fixed pixel offset
+- **yfinance pinned**: `yfinance==1.2.0` in requirements.txt for GitHub Actions consistency
+
+## Sector Classification + Fortune 500 (implemented)
+
+- **Migration**: `014_sector.sql` — `sector VARCHAR(60)` and `is_f500 BOOLEAN DEFAULT FALSE` on targets
+- **Sectors**: Technology, Gaming, Consumer Electronics, Automotive & EV, Media & Entertainment, Finance & Fintech, Retail, Defense & Aerospace, Mobility, Sports & Events, Education, Social Media, Luxury, Transport, Industrials
+- **Fortune 500**: US companies only; 151 tracked companies all classified as of 2026-03-20
+- **Dashboard sidebar**: sector multiselect + F500 checkbox filter above the Companies expander; Rankings tab filters to companies only
+
+## News Feed View (implemented)
+
+- **Sidebar nav**: "News Feed / Analysis" radio toggle at the top of the sidebar (above sector filters)
+- **News Feed mode**: full-screen chronological feed of all tracked headlines across all companies
+  - Date picker (calendar) — browse any past day, not just today
+  - Sector multiselect filter
+  - Each card: company name + sector pill + relative time + headline + score badge + implication tag + one-line description from top pro
+  - `fetch_todays_headlines(lookback_hours)` in `app.py`, TTL=120s
+- **Analysis mode**: existing Deep Dive / Compare / Rankings / Weekly Brief tabs
+
+## Key Implementation Notes
+
+- **Supabase 1000-row cap**: PostgREST silently truncates at 1000 rows even with `.limit(10000)`. Any query returning >1000 rows must loop with `.range(offset, offset+999)`.
+- **Python 3.9 datetime**: `_parse_iso_dt(ts)` helper normalises fractional seconds to exactly 6 digits before `fromisoformat()`. Supabase timestamps can have 5 decimal places which crash Python 3.9.
+- **Report event age**: `REPORT_EVENT_MAX_AGE_DAYS=3` in config.py — report only includes events created in last 3 days to prevent stale headlines resurfacing.
+- **Product logos**: `_target_logo_url()` falls back to parent company logo when product has no logo set.
+- **Streamlit theme**: `.streamlit/config.toml` must use `base=dark` to match custom CSS — light base causes white-on-white dropdowns.

@@ -9,6 +9,7 @@ Or with explicit Python path:
 """
 import base64
 import os
+import re
 import sys
 
 # Ensure src is on path so "from config import ..." works when run as streamlit run src/app.py
@@ -21,6 +22,15 @@ import pandas as pd
 from datetime import datetime, timedelta
 from typing import Optional
 from urllib.parse import urlparse
+
+
+def _parse_iso_dt(ts: str) -> datetime:
+    """Parse ISO 8601 timestamp robustly on Python 3.9 (fromisoformat is stricter there).
+    Normalises fractional seconds to exactly 6 digits before parsing."""
+    ts = ts.replace("Z", "+00:00")
+    # Pad or truncate fractional seconds to exactly 6 digits
+    ts = re.sub(r"\.(\d+)([+-])", lambda m: "." + (m.group(1) + "000000")[:6] + m.group(2), ts)
+    return datetime.fromisoformat(ts)
 
 import requests
 
@@ -53,6 +63,7 @@ except ImportError:
 st.set_page_config(
     layout="wide",
     page_title="Market Intelligence",
+    page_icon="📊",
     initial_sidebar_state="expanded",
 )
 
@@ -61,202 +72,326 @@ st.set_page_config(
 # Minimal custom CSS: only for our hero card and avatar initials (no global overrides)
 # -----------------------------------------------------------------------------
 def _inject_custom_css() -> None:
-    st.markdown(
-        """
+    d = {
+        "bg":            "#0A0E1A",
+        "surface":       "rgba(255,255,255,0.06)",
+        "surface_hover": "rgba(255,255,255,0.10)",
+        "border":        "rgba(255,255,255,0.10)",
+        "text1":         "#F5F5F7",
+        "text2":         "#A1A1A6",
+        "text3":         "#D1D1D6",
+        "accent":        "#2997FF",
+        "sidebar_bg":    "rgba(16,21,40,0.97)",
+        "hero_bg":       "rgba(255,255,255,0.06)",
+        "hero_border":   "rgba(255,255,255,0.12)",
+        "tab_list":      "rgba(255,255,255,0.06)",
+        "tab_active":    "rgba(255,255,255,0.14)",
+        "tab_active_c":  "#F5F5F7",
+        "tab_inactive_c":"#A1A1A6",
+        "expander_bg":   "rgba(255,255,255,0.04)",
+        "rank_bg":       "rgba(255,255,255,0.04)",
+        "mesh1":         "#1A2A4A",
+        "mesh2":         "#2A1A4A",
+        "mesh3":         "#1A3A2A",
+        "input_bg":      "rgba(255,255,255,0.06)",
+        "hr":            "rgba(255,255,255,0.08)",
+        "pcc_label_bdr": "rgba(255,255,255,0.08)",
+        "pcc_item_bdr":  "rgba(255,255,255,0.04)",
+        "pcc_quote_bg":  "rgba(41,151,255,0.08)",
+        "caption_bg":    "rgba(255,255,255,0.06)",
+        "shadow":        "rgba(0,0,0,0.45)",
+        "shadow_hover":  "rgba(0,0,0,0.65)",
+        "blob_opacity":  "0.40",
+        "hdr_bg":        "rgba(10,14,26,0.90)",
+        "shimmer":       "rgba(255,255,255,0.07)",
+        "pill_shadow":   "0 2px 8px rgba(0,0,0,0.4)",
+    }
+    st.markdown(f"""
         <style>
         /* ── Global ─────────────────────────────────────────── */
-        html, body, [class*="css"] {
+        html, body {{
+            color-scheme: dark !important;
+        }}
+        html, body, [class*="css"] {{
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
                          Helvetica, Arial, sans-serif !important;
             -webkit-font-smoothing: antialiased;
-        }
-        .stApp { background: #F5F5F7 !important; }
-        #MainMenu { visibility: hidden; }
-        footer { visibility: hidden; }
-        header[data-testid="stHeader"] { background: transparent !important; box-shadow: none !important; }
-        .stAppDeployButton { display: none !important; }
-        .stMainBlockContainer { padding-top: 2rem !important; }
+        }}
+        .stApp, .main, [data-testid="stAppViewContainer"],
+        [data-testid="stMain"], [data-testid="stAppViewContainer"] > .main {{
+            background: {d['bg']} !important;
+        }}
+        #MainMenu {{ visibility: hidden; }}
+        footer {{ visibility: hidden; }}
+        header[data-testid="stHeader"] {{ background: transparent !important; box-shadow: none !important; }}
+        .stAppDeployButton {{ display: none !important; }}
+        .stMainBlockContainer {{ padding-top: 1.5rem !important; }}
+
+        /* ── Gradient mesh blobs ─────────────────────────────── */
+        .mesh-blob {{
+            position: fixed; border-radius: 50%; filter: blur(90px);
+            pointer-events: none; z-index: 0; opacity: {d['blob_opacity']};
+        }}
+        .mesh-b1 {{ width:700px; height:700px; background:{d['mesh1']}; top:-200px; left:-200px;
+                    animation: mf1 18s ease-in-out infinite; }}
+        .mesh-b2 {{ width:600px; height:600px; background:{d['mesh2']}; bottom:-150px; right:-150px;
+                    animation: mf2 22s ease-in-out infinite; }}
+        .mesh-b3 {{ width:400px; height:400px; background:{d['mesh3']}; top:40%; left:55%;
+                    animation: mf3 26s ease-in-out infinite; }}
+        @keyframes mf1 {{
+            0%,100% {{ transform: translate(0,0) scale(1); }}
+            33%      {{ transform: translate(60px,-40px) scale(1.06); }}
+            66%      {{ transform: translate(-30px,50px) scale(0.97); }}
+        }}
+        @keyframes mf2 {{
+            0%,100% {{ transform: translate(0,0) scale(1); }}
+            40%      {{ transform: translate(-50px,40px) scale(1.09); }}
+            70%      {{ transform: translate(40px,-30px) scale(0.95); }}
+        }}
+        @keyframes mf3 {{
+            0%,100% {{ transform: translate(0,0) scale(1); }}
+            50%      {{ transform: translate(30px,55px) scale(1.13); }}
+        }}
+
+        /* ── Page header ─────────────────────────────────────── */
+        .page-header {{
+            position: sticky; top: 3.5rem; z-index: 200;
+            background: {d['hdr_bg']};
+            backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+            border-bottom: 1px solid {d['border']};
+            padding: 10px 16px; margin: -1.5rem -1rem 1.5rem -1rem;
+            display: flex; align-items: center; gap: 10px;
+        }}
+        .ph-title {{ font-size: 0.9rem; font-weight: 700; color: {d['text1']}; letter-spacing: -0.02em; }}
+        .ph-sep   {{ color: {d['text2']}; font-size: 0.85rem; }}
+        .ph-target {{ font-size: 0.9rem; font-weight: 500; color: {d['accent']}; }}
+        .ph-live  {{
+            margin-left: auto; display: flex; align-items: center; gap: 6px;
+            font-size: 0.75rem; font-weight: 600; color: #30D158;
+            letter-spacing: 0.05em; text-transform: uppercase;
+        }}
+        .live-dot {{
+            width: 7px; height: 7px; border-radius: 50%; background: #30D158;
+            animation: pulse-green 2s ease-in-out infinite;
+        }}
+        @keyframes pulse-green {{
+            0%,100% {{ opacity:1; transform:scale(1); }}
+            50%      {{ opacity:0.45; transform:scale(0.8); }}
+        }}
 
         /* ── Sidebar ─────────────────────────────────────────── */
-        [data-testid="stSidebar"] {
-            background: rgba(255,255,255,0.92) !important;
+        [data-testid="stSidebar"] {{
+            background: {d['sidebar_bg']} !important;
             backdrop-filter: blur(20px);
-            border-right: 1px solid rgba(0,0,0,0.07) !important;
-        }
-        [data-testid="stSidebar"] .stMarkdown h2 {
-            font-size: 1rem; font-weight: 700; color: #1D1D1F; letter-spacing: -0.02em;
-        }
-        [data-testid="stSidebar"] [data-testid="stExpander"] {
-            background: rgba(0,0,0,0.02) !important;
+            border-right: 1px solid {d['border']} !important;
+        }}
+        [data-testid="stSidebar"] .stMarkdown h2 {{
+            font-size: 1rem; font-weight: 700; color: {d['text1']}; letter-spacing: -0.02em;
+        }}
+        [data-testid="stSidebar"] [data-testid="stExpander"] {{
+            background: {d['input_bg']} !important;
             border-radius: 12px !important;
-            border: 1px solid rgba(0,0,0,0.07) !important;
+            border: 1px solid {d['border']} !important;
             box-shadow: none !important;
-        }
+        }}
 
         /* ── Typography ──────────────────────────────────────── */
-        h1, h2, h3 { color: #1D1D1F; letter-spacing: -0.03em; line-height: 1.15; font-weight: 700; }
-        p, li { color: #1D1D1F; line-height: 1.6; }
-        .stCaption, [data-testid="stCaptionContainer"] p { color: #86868B !important; font-size: 0.82rem !important; }
+        h1, h2, h3 {{ color: {d['text1']}; letter-spacing: -0.03em; line-height: 1.15; font-weight: 700; }}
+        p, li {{ color: {d['text1']}; line-height: 1.6; }}
+        .stCaption, [data-testid="stCaptionContainer"] p {{ color: {d['text2']} !important; font-size: 0.82rem !important; }}
 
         /* ── Tabs ─────────────────────────────────────────────── */
-        .stTabs [data-baseweb="tab-list"] {
-            gap: 4px;
-            background: rgba(0,0,0,0.05);
-            border-radius: 14px;
-            padding: 5px;
-            border: none;
-            display: flex;
-            width: 100%;
-        }
-        .stTabs [data-baseweb="tab"] {
-            flex: 1;
-            text-align: center;
-            justify-content: center;
-            border-radius: 10px;
-            padding: 8px 0;
-            font-size: 0.875rem;
-            font-weight: 500;
-            color: #86868B;
-            border: none;
-            background: transparent;
-            transition: all 0.18s ease;
-            letter-spacing: 0.01em;
-        }
-        .stTabs [aria-selected="true"] {
-            background: #FFFFFF !important;
-            color: #1D1D1F !important;
-            font-weight: 600;
-            box-shadow: 0 1px 6px rgba(0,0,0,0.10);
-        }
+        .stTabs [data-baseweb="tab-list"] {{
+            gap: 4px; background: {d['tab_list']}; border-radius: 14px;
+            padding: 5px; border: none; display: flex; width: 100%;
+        }}
+        .stTabs [data-baseweb="tab"] {{
+            flex: 1; text-align: center; justify-content: center;
+            border-radius: 10px; padding: 8px 0; font-size: 0.875rem;
+            font-weight: 500; color: {d['tab_inactive_c']}; border: none;
+            background: transparent; transition: all 0.18s ease; letter-spacing: 0.01em;
+        }}
+        .stTabs [aria-selected="true"] {{
+            background: {d['tab_active']} !important; color: {d['tab_active_c']} !important;
+            font-weight: 600; box-shadow: 0 1px 6px {d['shadow']};
+        }}
 
         /* ── Expanders ───────────────────────────────────────── */
-        [data-testid="stExpander"] {
-            background: rgba(255,255,255,0.80) !important;
+        [data-testid="stExpander"] {{
+            background: {d['expander_bg']} !important;
             backdrop-filter: blur(20px);
             border-radius: 18px !important;
-            border: 1px solid rgba(0,0,0,0.06) !important;
-            box-shadow: 0 2px 18px rgba(0,0,0,0.04) !important;
-            margin-bottom: 12px;
-            overflow: hidden;
-        }
-        [data-testid="stExpander"] details summary p {
-            font-weight: 600 !important;
-            font-size: 0.95rem !important;
-            color: #1D1D1F !important;
-        }
-        [data-testid="stExpander"] details summary:hover { background: rgba(0,0,0,0.02); }
+            border: 1px solid {d['border']} !important;
+            box-shadow: 0 2px 18px {d['shadow']} !important;
+            margin-bottom: 12px; overflow: hidden;
+            transition: transform 0.2s cubic-bezier(0.4,0,0.2,1), box-shadow 0.2s ease !important;
+        }}
+        [data-testid="stExpander"]:hover {{
+            transform: translateY(-2px) !important;
+            box-shadow: 0 8px 36px {d['shadow_hover']} !important;
+        }}
+        [data-testid="stExpander"] details summary {{
+            background: transparent !important;
+        }}
+        [data-testid="stExpander"] details summary p {{
+            font-weight: 600 !important; font-size: 0.95rem !important; color: {d['text1']} !important;
+        }}
+        [data-testid="stExpander"] details summary:hover {{ background: rgba(128,128,128,0.05) !important; }}
 
         /* ── Inputs / Selects ────────────────────────────────── */
-        [data-baseweb="select"] > div { border-radius: 12px !important; }
-        [data-testid="stMultiSelect"] span[data-baseweb="tag"] {
-            border-radius: 8px; background: rgba(0,113,227,0.1); color: #0071E3;
-        }
-        [data-testid="stRadio"] label { font-size: 0.875rem; font-weight: 500; }
-        [data-testid="stAlert"] { border-radius: 14px; border: none !important; }
-        hr { border-color: rgba(0,0,0,0.06); }
+        [data-baseweb="select"] > div {{ border-radius: 12px !important; background: {d['input_bg']} !important; }}
+        [data-baseweb="select"] span {{ color: {d['text1']} !important; }}
+        [data-testid="stMultiSelect"] span[data-baseweb="tag"] {{
+            border-radius: 8px; background: rgba(41,151,255,0.15); color: {d['accent']};
+        }}
+        [data-testid="stRadio"] label {{ font-size: 0.875rem; font-weight: 500; color: {d['text1']}; }}
+        [data-testid="stAlert"] {{ border-radius: 14px; border: none !important; }}
+        hr {{ border-color: {d['hr']}; }}
+        [data-testid="stToggle"] label {{ font-size: 0.85rem; font-weight: 500; color: {d['text2']}; }}
+
+        /* ── Selectbox dropdown portal ───────────────────────── */
+        [data-baseweb="popover"], [data-baseweb="menu"] {{
+            background: #1C2333 !important;
+            border: 1px solid {d['border']} !important;
+            border-radius: 12px !important;
+            box-shadow: 0 8px 32px {d['shadow']} !important;
+        }}
+        [data-baseweb="option"],
+        [data-baseweb="option"] * {{
+            background: transparent !important;
+            color: {d['text1']} !important;
+            font-size: 0.875rem !important;
+        }}
+        [data-baseweb="option"]:hover,
+        [data-baseweb="option"][aria-selected="true"] {{
+            background: {d['input_bg']} !important;
+        }}
+        li[role="option"],
+        li[role="option"] * {{
+            background: transparent !important;
+            color: {d['text1']} !important;
+        }}
+        li[role="option"]:hover {{ background: {d['input_bg']} !important; }}
+
+        /* ── Score ring animation ────────────────────────────── */
+        .score-ring {{
+            animation: ring-appear 0.65s cubic-bezier(0.34,1.56,0.64,1) forwards;
+        }}
+        @keyframes ring-appear {{
+            from {{ opacity:0; transform:scale(0.65); }}
+            to   {{ opacity:1; transform:scale(1); }}
+        }}
 
         /* ── Glass hero card ─────────────────────────────────── */
-        .hero-card {
-            background: rgba(255,255,255,0.88);
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
-            border-radius: 24px;
-            border: 1px solid rgba(255,255,255,0.70);
-            box-shadow: 0 8px 40px rgba(0,0,0,0.07);
-            padding: 36px 40px;
-            margin-bottom: 24px;
-        }
-        .hero-initial {
+        .hero-card {{
+            background: {d['hero_bg']};
+            backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px);
+            border-radius: 24px; border: 1px solid {d['hero_border']};
+            box-shadow: 0 8px 40px {d['shadow']};
+            padding: 36px 40px; margin-bottom: 12px;
+        }}
+        .hero-initial {{
             width: 72px; height: 72px; border-radius: 18px;
-            background: linear-gradient(135deg, #0071E3, #0055B3);
+            background: linear-gradient(135deg, {d['accent']}, #1055D4);
             color: #fff; font-size: 28px; font-weight: 700;
             display: inline-flex; align-items: center; justify-content: center;
             box-shadow: 0 4px 16px rgba(0,113,227,0.28);
-        }
-        .hero-type {
-            font-size: 0.70rem; font-weight: 700; color: #86868B;
+        }}
+        .hero-type {{
+            font-size: 0.70rem; font-weight: 700; color: {d['text2']};
             letter-spacing: 0.10em; text-transform: uppercase; display: block; margin-bottom: 4px;
-        }
-        .hero-name {
-            font-size: 2rem; font-weight: 700; color: #1D1D1F;
+        }}
+        .hero-name {{
+            font-size: 2rem; font-weight: 700; color: {d['text1']};
             letter-spacing: -0.04em; line-height: 1.1; margin: 0;
-        }
-        .hero-desc {
-            font-size: 0.95rem; color: #424245; line-height: 1.65; margin-top: 16px;
-        }
+        }}
+        .hero-desc {{
+            font-size: 0.95rem; color: {d['text3']}; line-height: 1.65; margin-top: 16px;
+        }}
 
         /* ── Badge pills ─────────────────────────────────────── */
-        .score-pill {
+        .score-pill {{
             display: inline-flex; align-items: center; gap: 5px;
-            padding: 4px 13px; border-radius: 980px;
+            padding: 5px 13px; border-radius: 980px;
             font-size: 0.78rem; font-weight: 600; line-height: 1.4;
-        }
-        .badge-row {
-            display: flex; align-items: center; gap: 8px;
-            flex-wrap: wrap; margin: 12px 0 0 0;
-        }
+            box-shadow: {d['pill_shadow']};
+        }}
+        .badge-row {{
+            display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 12px 0 0 0;
+        }}
 
         /* ── Event card internals ────────────────────────────── */
-        .pcc-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr 1fr;
-            gap: 28px;
-            margin: 4px 0 12px 0;
-        }
-        .pcc-label {
-            font-size: 0.68rem; font-weight: 700; color: #86868B;
+        .pcc-grid {{
+            display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 28px; margin: 4px 0 12px 0;
+        }}
+        .pcc-label {{
+            font-size: 0.68rem; font-weight: 700; color: {d['text2']};
             letter-spacing: 0.10em; text-transform: uppercase;
             margin-bottom: 10px; padding-bottom: 8px;
-            border-bottom: 1px solid rgba(0,0,0,0.07);
-        }
-        .pcc-item {
-            font-size: 0.875rem; color: #1D1D1F; line-height: 1.6;
-            padding: 5px 0; border-bottom: 1px solid rgba(0,0,0,0.04);
+            border-bottom: 1px solid {d['pcc_label_bdr']};
+        }}
+        .pcc-item {{
+            font-size: 0.875rem; color: {d['text1']}; line-height: 1.6;
+            padding: 5px 0; border-bottom: 1px solid {d['pcc_item_bdr']};
             display: flex; gap: 8px; align-items: flex-start;
-        }
-        .pcc-item-dot { color: #86868B; flex-shrink: 0; margin-top: 2px; }
-        .pcc-quote {
-            font-size: 0.85rem; color: #424245; line-height: 1.65; font-style: italic;
-            border-left: 3px solid #0071E3;
+        }}
+        .pcc-item-dot {{ color: {d['text2']}; flex-shrink: 0; margin-top: 2px; }}
+        .pcc-quote {{
+            font-size: 0.85rem; color: {d['text3']}; line-height: 1.65; font-style: italic;
+            border-left: 3px solid {d['accent']};
             padding: 8px 0 8px 14px; margin: 6px 0;
-            background: rgba(0,113,227,0.03); border-radius: 0 8px 8px 0;
-        }
-        .pcc-source-link {
-            font-size: 0.72rem; color: #0071E3; font-weight: 500;
+            background: {d['pcc_quote_bg']}; border-radius: 0 8px 8px 0;
+        }}
+        .pcc-source-link {{
+            font-size: 0.72rem; color: {d['accent']}; font-weight: 500;
             text-decoration: none; display: inline-block; margin-top: 3px;
-        }
-        .pcc-empty { font-size: 0.85rem; color: #86868B; }
-        .pcc-badge-row {
-            display: flex; align-items: center; gap: 8px;
-            flex-wrap: wrap; margin-bottom: 18px;
-        }
-        .pcc-source-caption {
-            font-size: 0.75rem; color: #86868B;
-            padding: 3px 10px; background: rgba(0,0,0,0.04); border-radius: 980px;
-        }
+        }}
+        .pcc-empty {{ font-size: 0.85rem; color: {d['text2']}; }}
+        .pcc-badge-row {{
+            display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 18px;
+        }}
+        .pcc-source-caption {{
+            font-size: 0.75rem; color: {d['text2']};
+            padding: 3px 10px; background: {d['caption_bg']}; border-radius: 980px;
+        }}
 
         /* ── Rankings ────────────────────────────────────────── */
-        .rank-row {
+        .rank-row {{
             display: flex; align-items: center;
             padding: 14px 20px; margin-bottom: 6px;
-            background: rgba(255,255,255,0.88);
-            border-radius: 14px; border: 1px solid rgba(0,0,0,0.05);
-            gap: 14px;
-        }
-        .rank-num { font-size: 0.85rem; font-weight: 700; color: #86868B; width: 28px; flex-shrink: 0; text-align: center; }
-        .rank-name-wrap { flex: 1; min-width: 0; }
-        .rank-name { font-size: 0.9rem; font-weight: 600; color: #1D1D1F; }
-        .rank-type { font-size: 0.7rem; color: #86868B; letter-spacing: 0.05em; text-transform: uppercase; }
-        .rank-meta { font-size: 0.8rem; color: #86868B; white-space: nowrap; }
+            background: {d['rank_bg']};
+            border-radius: 14px; border: 1px solid {d['border']};
+            gap: 14px; transition: transform 0.15s ease, box-shadow 0.15s ease;
+        }}
+        .rank-row:hover {{ transform: translateX(4px); box-shadow: 0 4px 20px {d['shadow_hover']}; }}
+        .rank-num   {{ font-size: 0.85rem; font-weight: 700; color: {d['text2']}; width: 32px; flex-shrink: 0; text-align: center; }}
+        .rank-medal {{ font-size: 1.25rem; width: 32px; flex-shrink: 0; text-align: center; line-height: 1; }}
+        .rank-name-wrap {{ flex: 1; min-width: 0; }}
+        .rank-name  {{ font-size: 0.9rem; font-weight: 600; color: {d['text1']}; }}
+        .rank-type  {{ font-size: 0.7rem; color: {d['text2']}; letter-spacing: 0.05em; text-transform: uppercase; }}
+        .rank-bar-track {{
+            height: 5px; background: {d['border']}; border-radius: 3px;
+            flex: 1; min-width: 60px; max-width: 110px; overflow: hidden; margin-top: 3px;
+        }}
+        .rank-meta {{ font-size: 0.8rem; color: {d['text2']}; white-space: nowrap; }}
 
         /* ── Section heads ───────────────────────────────────── */
-        .section-head {
-            font-size: 1.5rem; font-weight: 700; color: #1D1D1F;
+        .section-head {{
+            font-size: 1.5rem; font-weight: 700; color: {d['text1']};
             letter-spacing: -0.03em; margin: 0 0 4px 0;
-        }
-        .section-sub {
-            font-size: 0.875rem; color: #86868B; line-height: 1.5; margin-bottom: 20px;
-        }
+        }}
+        .section-sub {{
+            font-size: 0.875rem; color: {d['text2']}; line-height: 1.5; margin-bottom: 20px;
+        }}
+
+        /* ── Skeleton shimmer ────────────────────────────────── */
+        .skeleton {{ border-radius: 10px; overflow: hidden; position: relative; background: {d['border']}; }}
+        .skeleton::after {{
+            content: ''; position: absolute; inset: 0;
+            background: linear-gradient(90deg, transparent 0%, {d['shimmer']} 50%, transparent 100%);
+            animation: shimmer 1.6s ease-in-out infinite;
+        }}
+        @keyframes shimmer {{ 0% {{ transform: translateX(-100%); }} 100% {{ transform: translateX(100%); }} }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -312,6 +447,65 @@ def _score_label(score: int) -> str:
     return "Very Negative"
 
 
+def _score_ring_html(score: Optional[int], size: int = 80) -> str:
+    """SVG animated score ring (Apple Watch-style)."""
+    if score is None:
+        return ""
+    r = (size - 10) / 2
+    circ = 2 * 3.14159 * r
+    pct = (score + 10) / 20          # map -10..+10 → 0..1
+    dashoffset = circ * (1 - pct)
+    color = _score_color(score)
+    sign = "+" if score > 0 else ""
+    cx = cy = size / 2
+    fscore = round(size * 0.175)
+    flabel = round(size * 0.095)
+    return (
+        f'<div class="score-ring" style="position:relative;width:{size}px;height:{size}px;flex-shrink:0;">'
+        f'<svg width="{size}" height="{size}" viewBox="0 0 {size} {size}">'
+        f'<circle cx="{cx}" cy="{cy}" r="{r:.1f}" fill="none" stroke="rgba(128,128,128,0.15)" stroke-width="6"/>'
+        f'<circle cx="{cx}" cy="{cy}" r="{r:.1f}" fill="none" stroke="{color}" stroke-width="6"'
+        f' stroke-linecap="round" stroke-dasharray="{circ:.1f}" stroke-dashoffset="{dashoffset:.1f}"'
+        f' transform="rotate(-90 {cx} {cy})"/>'
+        f'</svg>'
+        f'<div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;">'
+        f'<span style="font-size:{fscore}px;font-weight:800;color:{color};line-height:1;">{sign}{score}</span>'
+        f'<span style="font-size:{flabel}px;font-weight:600;color:#86868B;letter-spacing:0.04em;text-transform:uppercase;">score</span>'
+        f'</div></div>'
+    )
+
+
+def _mini_sparkline_svg(score_rows: list, width: int = 200, height: int = 48) -> str:
+    """Inline SVG sparkline of 30-day rolling avg. Returns empty string if insufficient data."""
+    df = _build_score_timeseries(score_rows, 30)
+    if df.empty or len(df) < 2:
+        return ""
+    values = df["rolling_avg"].tolist()
+    mn = min(values) - 0.5
+    mx = max(values) + 0.5
+    if mx == mn:
+        mx = mn + 1.0
+    def px(i: int) -> float:
+        return i / (len(values) - 1) * width
+    def py(v: float) -> float:
+        return height - 4 - (v - mn) / (mx - mn) * (height - 8)
+    pts = " ".join(f"{px(i):.1f},{py(v):.1f}" for i, v in enumerate(values))
+    fill_pts = f"0,{height} {pts} {width},{height}"
+    color = _score_color(round(values[-1]))
+    uid = abs(hash(pts)) % 99999
+    return (
+        f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" style="overflow:visible;display:block;">'
+        f'<defs><linearGradient id="sf{uid}" x1="0" y1="0" x2="0" y2="1">'
+        f'<stop offset="0%" stop-color="{color}" stop-opacity="0.30"/>'
+        f'<stop offset="100%" stop-color="{color}" stop-opacity="0"/>'
+        f'</linearGradient></defs>'
+        f'<polygon points="{fill_pts}" fill="url(#sf{uid})"/>'
+        f'<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="2.5"'
+        f' stroke-linecap="round" stroke-linejoin="round"/>'
+        f'</svg>'
+    )
+
+
 def _render_score_badge(score: Optional[int]) -> None:
     """Render a colored score pill: e.g. ▲ +6 Positive"""
     if score is None:
@@ -345,7 +539,7 @@ def _compute_momentum(score_rows: list) -> Optional[float]:
             continue
         raw = row.get("created_at") or ""
         try:
-            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            dt = _parse_iso_dt(raw)
         except Exception:
             continue
         if dt >= cutoff_recent:
@@ -441,11 +635,11 @@ def _render_momentum_badge(momentum: Optional[float]) -> None:
 # Data fetching
 # -----------------------------------------------------------------------------
 def fetch_targets():
-    """Fetch all targets for sidebar (id, name, type, parent). Selected target details from fetch_target_by_id."""
+    """Fetch all tracked targets for sidebar (id, name, type, parent). Selected target details from fetch_target_by_id."""
     supabase = get_supabase()
     resp = supabase.table("targets").select(
-        "id, name, target_type, status, parent_target_id, logo_url, domain"
-    ).execute()
+        "id, name, target_type, status, parent_target_id, logo_url, domain, sector, is_f500"
+    ).eq("status", "tracking").execute()
     return getattr(resp, "data", None) or []
 
 
@@ -466,9 +660,17 @@ def _target_initial(target: dict) -> str:
 
 
 def _target_logo_url(target: dict) -> Optional[str]:
-    """Logo URL if set and non-empty; else None."""
+    """Logo URL for target; falls back to parent company logo for products with no logo."""
     url = (target.get("logo_url") or "").strip()
-    return url if url else None
+    if url:
+        return url
+    parent_id = target.get("parent_target_id")
+    if parent_id:
+        targets_by_id: dict = st.session_state.get("_targets_by_id", {})
+        parent = targets_by_id.get(parent_id, {})
+        url = (parent.get("logo_url") or "").strip()
+        return url if url else None
+    return None
 
 
 def _is_image_bytes(data: bytes) -> bool:
@@ -591,7 +793,7 @@ def fetch_sentiment_for_target_ungrouped(target_id: Optional[int]):
     return getattr(resp, "data", None) or []
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=60)
 def fetch_price_reaction(event_id: Optional[int]) -> Optional[dict]:
     """Fetch price reaction row for an event. Returns None if no ticker / no data."""
     if event_id is None:
@@ -608,29 +810,35 @@ def fetch_price_reaction(event_id: Optional[int]) -> Optional[dict]:
     return rows[0] if rows else None
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=60)
 def fetch_price_series(target_id: Optional[int], days: int = 30) -> list:
-    """Fetch daily close prices for the price chart (last N days, last bar per day)."""
+    """Fetch daily close prices for the price chart (last N days, last bar per day).
+    Paginates in 1000-row pages to work around Supabase's default row cap."""
     if target_id is None:
         return []
     from datetime import timezone as _tz
     cutoff = (datetime.now(_tz.utc) - timedelta(days=days)).isoformat()
     supabase = get_supabase()
-    resp = (
-        supabase.table("stock_prices")
-        .select("ts, close")
-        .eq("target_id", target_id)
-        .gte("ts", cutoff)
-        .order("ts", desc=False)
-        .limit(10000)
-        .execute()
-    )
-    rows = getattr(resp, "data", None) or []
-    # Collapse to one close per day (last bar of day)
     by_date: dict = {}
-    for r in rows:
-        day = r["ts"][:10]
-        by_date[day] = r["close"]
+    page_size = 1000
+    offset = 0
+    while True:
+        resp = (
+            supabase.table("stock_prices")
+            .select("ts, close")
+            .eq("target_id", target_id)
+            .gte("ts", cutoff)
+            .order("ts", desc=False)
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        rows = getattr(resp, "data", None) or []
+        for r in rows:
+            day = r["ts"][:10]
+            by_date[day] = r["close"]  # last bar of day wins (ascending order)
+        if len(rows) < page_size:
+            break
+        offset += page_size
     return [{"date": d, "close": c} for d, c in sorted(by_date.items())]
 
 
@@ -648,6 +856,48 @@ def fetch_all_sentiment_scores_for_target(target_id: Optional[int]) -> list:
         .execute()
     )
     return getattr(resp, "data", None) or []
+
+
+@st.cache_data(ttl=120)
+def fetch_todays_headlines(lookback_hours: int = 24) -> tuple:
+    """Fetch all events from the last N hours across all tracked targets.
+    Returns (events_list, sentiment_map) where sentiment_map is event_id -> {score, tag, desc}."""
+    from datetime import datetime, timedelta, timezone
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=lookback_hours)).isoformat()
+    sb = get_supabase()
+
+    events = (
+        sb.table("events")
+        .select("id, target_id, headline, created_at")
+        .gte("created_at", cutoff)
+        .order("created_at", desc=True)
+        .limit(300)
+        .execute()
+        .data or []
+    )
+
+    event_ids = [e["id"] for e in events if e.get("id")]
+    sentiment_map: dict = {}
+    if event_ids:
+        sent_rows = (
+            sb.table("sentiment")
+            .select("event_id, sentiment_score, implication_tag, pros")
+            .gte("created_at", cutoff)
+            .limit(1000)
+            .execute()
+            .data or []
+        )
+        for s in sent_rows:
+            eid = s.get("event_id")
+            if eid and eid not in sentiment_map:
+                pros_text = (s.get("pros") or "").strip()
+                sentiment_map[eid] = {
+                    "score": s.get("sentiment_score"),
+                    "tag": s.get("implication_tag"),
+                    "desc": pros_text[:160] if pros_text else "",
+                }
+
+    return events, sentiment_map
 
 
 def fetch_all_scores_batch() -> dict:
@@ -791,7 +1041,10 @@ def aggregate_sentiment(sentiments: list) -> dict:
         url = (s.get("source_url") or "").strip()
         if quotes and not _text_is_placeholder(quotes):
             for line in _to_bullet_lines(quotes):
-                voice.append((line, url))
+                # Skip lines where the AI put a URL as the quote text itself.
+                # The source URL is already shown via the "View source →" link.
+                if not line.startswith(("http://", "https://")):
+                    voice.append((line, url))
     # Dedupe voice by quote text (same quote from different sources → show once)
     voice_deduped = []
     seen_quote_key = set()
@@ -822,14 +1075,19 @@ def aggregate_sentiment(sentiments: list) -> dict:
 # -----------------------------------------------------------------------------
 # Sidebar: navigation (Companies / Products)
 # -----------------------------------------------------------------------------
-def render_sidebar(targets: list, selected_target_id: Optional[int]) -> Optional[int]:
-    """Render sidebar: Companies first; Products filtered by selected company. Returns selected target_id."""
+def render_sidebar(targets: list, selected_target_id: Optional[int]) -> tuple:
+    """Render sidebar. Returns (view, selected_target_id) where view is 'news' or 'analysis'."""
     with st.sidebar:
         st.markdown(
-            '<p style="font-size:1rem;font-weight:700;color:#1D1D1F;letter-spacing:-0.02em;margin:0 0 4px 0;">Market Intelligence</p>'
-            '<p style="font-size:0.75rem;color:#86868B;margin:0 0 12px 0;">Powered by Gemini · Supabase</p>',
+            '<p style="font-size:1rem;font-weight:700;color:#F5F5F7;letter-spacing:-0.02em;margin:0 0 4px 0;">Market Intelligence</p>'
+            '<p style="font-size:0.75rem;color:#A1A1A6;margin:0 0 12px 0;">Powered by OpenAI · Supabase</p>',
             unsafe_allow_html=True,
         )
+        st.divider()
+
+        # ── Top-level navigation ───────────────────────────────
+        view = st.radio("View", ["News Feed", "Analysis"], horizontal=True,
+                        label_visibility="collapsed", key="sidebar_view")
         st.divider()
 
         companies = [t for t in targets if (t.get("target_type") or "").upper() == "COMPANY"]
@@ -838,98 +1096,57 @@ def render_sidebar(targets: list, selected_target_id: Optional[int]) -> Optional
         if not companies and not all_products:
             st.caption("No targets yet. Add companies or products to get started.")
             st.divider()
-            return None
+            return view, None
 
-        prev_company = st.session_state.get("_sidebar_company_id")
-        prev_product = st.session_state.get("_sidebar_product_id")
+        # ── Sector + F500 filters (Analysis only) ─────────────
+        all_sectors = sorted({(t.get("sector") or "").strip() for t in companies if (t.get("sector") or "").strip()})
+        if all_sectors:
+            sel_sectors = st.multiselect("Sector", all_sectors, placeholder="All sectors", label_visibility="collapsed", key="sidebar_sector_filter")
+        else:
+            sel_sectors = []
+
+        f500_only = st.checkbox("Fortune 500 only", key="sidebar_f500_filter")
+
+        # Apply filters to company list
+        if sel_sectors:
+            companies = [c for c in companies if (c.get("sector") or "").strip() in sel_sectors]
+        if f500_only:
+            companies = [c for c in companies if c.get("is_f500")]
 
         company_ids = [c["id"] for c in companies]
         c_idx = company_ids.index(selected_target_id) if selected_target_id in company_ids else 0
-        # If current selection is a product, pre-select its parent company in the dropdown
+        # If current selection is a product, pre-select its parent company
         if selected_target_id and selected_target_id not in company_ids:
             for p in all_products:
                 if p.get("id") == selected_target_id and p.get("parent_target_id") in company_ids:
-                    if p["parent_target_id"] in company_ids:
-                        c_idx = company_ids.index(p["parent_target_id"])
+                    c_idx = company_ids.index(p["parent_target_id"])
                     break
 
         new_company_id = None
         new_product_id = None
 
-        def _company_options(searchterm: str):
-            term = (searchterm or "").strip().lower()
-            if not term:
-                return [(c.get("name") or f"Target {c.get('id')}", c["id"]) for c in companies]
-            return [(c.get("name") or f"Target {c.get('id')}", c["id"]) for c in companies if term in (c.get("name") or "").lower()]
-
-        def _product_options(searchterm: str):
-            term = (searchterm or "").strip().lower()
-            if not term:
-                return [(p.get("name") or f"Target {p.get('id')}", p["id"]) for p in products]
-            return [(p.get("name") or f"Target {p.get('id')}", p["id"]) for p in products if term in (p.get("name") or "").lower()]
-
-        # Products list depends on selected company (set below for searchbox path)
-        products = all_products  # will overwrite when company selected
-        new_company_id = prev_company
-        new_product_id = prev_product
-
         with st.expander("**Companies**", expanded=bool(companies)):
             if companies:
-                if _SEARCHBOX_AVAILABLE:
-                    default_c = next((c for c in companies if c["id"] == selected_target_id), companies[0])
-                    default_val = (default_c.get("name") or f"Target {default_c['id']}", default_c["id"]) if default_c else None
-                    selected_c = st_searchbox(
-                        _company_options,
-                        key="sidebar_companies_search",
-                        placeholder="Search and select company...",
-                        default=default_val,
-                        default_options=[(c.get("name") or f"Target {c['id']}", c["id"]) for c in companies],
-                    )
-                    if selected_c is not None:
-                        new_company_id = selected_c[1] if isinstance(selected_c, (list, tuple)) and len(selected_c) >= 2 else selected_c
-                    else:
-                        new_company_id = selected_target_id if selected_target_id in company_ids else (companies[0]["id"] if companies else None)
-                else:
-                    c_labels = [c.get("name") or f"Target {c.get('id')}" for c in companies]
-                    c_idx = company_ids.index(selected_target_id) if selected_target_id in company_ids else 0
-                    sel_c = st.selectbox("Select company", range(len(c_labels)), format_func=lambda i: c_labels[i], index=c_idx, key="sidebar_companies")
-                    new_company_id = company_ids[sel_c]
+                c_labels = [c.get("name") or f"Target {c.get('id')}" for c in companies]
+                sel_c = st.selectbox("Select company", range(len(c_labels)), format_func=lambda i: c_labels[i], index=c_idx, key="sidebar_companies", label_visibility="collapsed")
+                new_company_id = company_ids[sel_c]
             else:
                 st.caption("No companies yet.")
 
-        if new_company_id is not None:
-            products = [p for p in all_products if p.get("parent_target_id") == new_company_id]
-        else:
-            products = all_products
+        products = [p for p in all_products if p.get("parent_target_id") == new_company_id] if new_company_id else all_products
         product_ids = [p["id"] for p in products]
 
         with st.expander("**Products**", expanded=bool(products)):
             if products:
-                if _SEARCHBOX_AVAILABLE:
-                    default_p = next((p for p in products if p["id"] == selected_target_id), products[0] if products else None)
-                    default_val = (default_p.get("name") or f"Target {default_p['id']}", default_p["id"]) if default_p else None
-                    selected_p = st_searchbox(
-                        _product_options,
-                        key="sidebar_products_search",
-                        placeholder="Search and select product...",
-                        default=default_val,
-                        default_options=[(p.get("name") or f"Target {p['id']}", p["id"]) for p in products],
-                    )
-                    if selected_p is not None:
-                        new_product_id = selected_p[1] if isinstance(selected_p, (list, tuple)) and len(selected_p) >= 2 else selected_p
-                    else:
-                        new_product_id = selected_target_id if selected_target_id in product_ids else (products[0]["id"] if products else None)
-                else:
-                    p_labels = [p.get("name") or f"Target {p.get('id')}" for p in products]
-                    p_idx = product_ids.index(selected_target_id) if selected_target_id in product_ids else 0
-                    sel_p = st.selectbox("Select product", range(len(p_labels)), format_func=lambda i: p_labels[i], index=p_idx, key="sidebar_products")
-                    new_product_id = product_ids[sel_p]
+                p_labels = [p.get("name") or f"Target {p.get('id')}" for p in products]
+                p_idx = product_ids.index(selected_target_id) if selected_target_id in product_ids else 0
+                sel_p = st.selectbox("Select product", range(len(p_labels)), format_func=lambda i: p_labels[i], index=p_idx, key="sidebar_products", label_visibility="collapsed")
+                new_product_id = product_ids[sel_p]
             else:
-                if new_company_id is not None:
-                    st.caption("No products linked to this company.")
-                else:
-                    st.caption("No products yet.")
+                st.caption("No products linked to this company." if new_company_id else "No products yet.")
 
+        prev_company = st.session_state.get("_sidebar_company_id")
+        prev_product = st.session_state.get("_sidebar_product_id")
         st.session_state["_sidebar_company_id"] = new_company_id
         st.session_state["_sidebar_product_id"] = new_product_id
 
@@ -943,14 +1160,14 @@ def render_sidebar(targets: list, selected_target_id: Optional[int]) -> Optional
             choice_id = new_company_id if new_company_id is not None else new_product_id
 
         st.divider()
-        return choice_id
+        return view, choice_id
 
 
 # -----------------------------------------------------------------------------
 # Main: target overview (hero with logo/initial + description)
 # -----------------------------------------------------------------------------
 def render_target_overview(target: dict, score_rows: Optional[list] = None) -> None:
-    """Render target as a hero card: logo or initial, name, description, score momentum."""
+    """Render target as a hero card: logo/initial, score ring, sparkline, momentum badges."""
     if not target:
         return
     name = target.get("name") or "Unnamed Target"
@@ -958,12 +1175,10 @@ def render_target_overview(target: dict, score_rows: Optional[list] = None) -> N
     logo_url = _target_logo_url(target)
     initial = _target_initial(target)
 
-    # Hero: try primary logo_url (Clearbit), then Google favicon by domain; else initial
     domain = target.get("domain") or (_domain_from_logo_url(logo_url) if logo_url else None)
     logo_bytes = _get_logo_bytes(logo_url, domain)
     target_type = (target.get("target_type") or "").upper()
 
-    # Build inline logo HTML (data URL avoids st.image layout constraints)
     if logo_bytes:
         data_url = _logo_data_url(logo_bytes)
         logo_html = (
@@ -973,19 +1188,13 @@ def render_target_overview(target: dict, score_rows: Optional[list] = None) -> N
     else:
         logo_html = f'<div class="hero-initial">{_he(initial)}</div>'
 
-    # Score + momentum badges
+    # Compute score, ring, momentum badges
+    avg_score: Optional[int] = None
     badges = []
     if score_rows:
         recent_scores = [r.get("sentiment_score") for r in score_rows[-10:] if r.get("sentiment_score") is not None]
         if recent_scores:
-            avg = round(sum(recent_scores) / len(recent_scores))
-            color = _score_color(avg)
-            arrow = "▲" if avg > 0 else ("▼" if avg < 0 else "●")
-            sign = "+" if avg > 0 else ""
-            badges.append(
-                f'<span class="score-pill" style="background:{color};color:#fff;">'
-                f'{arrow} {sign}{avg} {_score_label(avg)}</span>'
-            )
+            avg_score = round(sum(recent_scores) / len(recent_scores))
         momentum = _compute_momentum(score_rows)
         if momentum is not None:
             if momentum > 0:
@@ -993,30 +1202,46 @@ def render_target_overview(target: dict, score_rows: Optional[list] = None) -> N
             elif momentum < 0:
                 mc, ma, ml = "#dc2626", "↓", f"{momentum} vs last 7d"
             else:
-                mc, ma, ml = "#6b7280", "→", "Stable vs last 7d"
+                mc, ma, ml = "#6b7280", "→", "Stable"
             badges.append(
                 f'<span class="score-pill" style="background:{mc};color:#fff;">{ma} {ml}</span>'
             )
+        label_str = _score_label(avg_score) if avg_score is not None else ""
+        if avg_score is not None:
+            badges.append(
+                f'<span style="font-size:0.78rem;font-weight:600;color:{_score_color(avg_score)};">'
+                f'{label_str}</span>'
+            )
+
+    ring_html = _score_ring_html(avg_score, size=84)
     badge_html = f'<div class="badge-row">{"".join(badges)}</div>' if badges else ""
     type_html = f'<span class="hero-type">{_he(target_type)}</span>' if target_type else ""
     desc_html = f'<div class="hero-desc">{_he(description)}</div>' if description else ""
 
-    # Build as a single flat string — Streamlit's markdown parser mis-renders
-    # multiline HTML by treating newline-separated closing tags as literal text.
+    # Inline 30-day sparkline at the bottom of the card
+    spark_html = ""
+    if score_rows:
+        spark = _mini_sparkline_svg(score_rows, width=220, height=44)
+        if spark:
+            spark_html = (
+                f'<div style="margin-top:20px;padding-top:16px;border-top:1px solid rgba(128,128,128,0.12);">'
+                f'<div style="font-size:0.68rem;font-weight:700;color:#86868B;letter-spacing:0.08em;'
+                f'text-transform:uppercase;margin-bottom:8px;">30-day trend</div>'
+                f'{spark}'
+                f'</div>'
+            )
+
     inner = (
         f'<div style="flex:1;min-width:0;">'
         f'{type_html}'
         f'<div class="hero-name">{_he(name)}</div>'
         f'{badge_html}'
         f'</div>'
+        f'{ring_html}'
     )
-    row = (
-        f'<div style="display:flex;align-items:flex-start;gap:20px;">'
-        f'{logo_html}{inner}'
-        f'</div>'
-    )
+    row = f'<div style="display:flex;align-items:flex-start;gap:20px;">{logo_html}{inner}</div>'
     st.markdown(
-        f'<div class="hero-card">{row}{desc_html}</div>',
+        f'<div class="hero-card">{row}{desc_html}{spark_html}</div>',
         unsafe_allow_html=True,
     )
 
@@ -1024,19 +1249,44 @@ def render_target_overview(target: dict, score_rows: Optional[list] = None) -> N
 # -----------------------------------------------------------------------------
 # Timeline: events and sentiment (expanders, 3 columns)
 # -----------------------------------------------------------------------------
+_DOMAIN_NAMES = {
+    "news.ycombinator.com": "Hacker News",
+    "ycombinator.com":      "Hacker News",
+    "reddit.com":           "Reddit",
+    "old.reddit.com":       "Reddit",
+    "stackoverflow.com":    "Stack Overflow",
+    "finance.yahoo.com":    "Yahoo Finance",
+    "yahoo.com":            "Yahoo Finance",
+    "reuters.com":          "Reuters",
+    "bloomberg.com":        "Bloomberg",
+    "techcrunch.com":       "TechCrunch",
+    "wsj.com":              "Wall Street Journal",
+    "ft.com":               "Financial Times",
+    "cnbc.com":             "CNBC",
+    "forbes.com":           "Forbes",
+    "businessinsider.com":  "Business Insider",
+    "theverge.com":         "The Verge",
+    "wired.com":            "Wired",
+    "arstechnica.com":      "Ars Technica",
+    "venturebeat.com":      "VentureBeat",
+    "seekingalpha.com":     "Seeking Alpha",
+    "marketwatch.com":      "MarketWatch",
+    "sec.gov":              "SEC EDGAR",
+}
+
+
 def _source_label(url: str) -> str:
-    """Derive a short label from URL for display (e.g. news.ycombinator.com)."""
+    """Return a human-readable publication name for a URL."""
     if not url:
         return "Source"
     url = url.strip()
     if not url.startswith("http"):
         return "Source"
     try:
-        parsed = urlparse(url)
-        netloc = (parsed.netloc or "").strip()
+        netloc = (urlparse(url).netloc or "").strip().lower()
         if netloc.startswith("www."):
             netloc = netloc[4:]
-        return netloc or "Source"
+        return _DOMAIN_NAMES.get(netloc) or netloc or "Source"
     except Exception:
         return "Source"
 
@@ -1047,7 +1297,7 @@ def render_event_card(event: dict, sentiments: list) -> None:
     created = event.get("created_at")
     if created:
         try:
-            dt = datetime.fromisoformat(created.replace("Z", "+00:00")) if isinstance(created, str) and "T" in created else created
+            dt = _parse_iso_dt(created) if isinstance(created, str) and "T" in created else created
             date_str = dt.strftime("%b %d, %Y") if hasattr(dt, "strftime") else str(created)
         except Exception:
             date_str = str(created)
@@ -1057,6 +1307,23 @@ def render_event_card(event: dict, sentiments: list) -> None:
     tag = _dominant_tag(sentiments)
     tag_prefix = f"{_TAG_META[tag]['emoji']} " if tag and tag in _TAG_META else ""
     label = f"{tag_prefix}{headline} — {date_str}" if date_str else f"{tag_prefix}{headline}"
+
+    # Inject scoped CSS that gives this expander a colored left border by implication tag.
+    # Uses CSS :has() (Chrome 105+, Safari 15.4+, Firefox 121+) to target the sibling expander.
+    _TAG_BORDER = {
+        "threat":      "#dc2626",
+        "opportunity": "#16a34a",
+        "monitor":     "#ca8a04",
+        "no_action":   "#6b7280",
+    }
+    border_color = _TAG_BORDER.get(tag or "", "transparent")
+    card_id = f"ec-{event.get('id', 'x')}"
+    st.markdown(
+        f'<style>.element-container:has(#{card_id}) + .element-container [data-testid="stExpander"]'
+        f'{{border-left:4px solid {border_color} !important;border-radius:0 18px 18px 0 !important;}}</style>'
+        f'<span id="{card_id}" style="display:none;"></span>',
+        unsafe_allow_html=True,
+    )
 
     with st.expander(label, expanded=True):
         if not sentiments:
@@ -1088,35 +1355,76 @@ def render_event_card(event: dict, sentiments: list) -> None:
         if source_label:
             badges.append(f'<span class="pcc-source-caption">Sources: {_he(source_label)}</span>')
 
-        # ── Price reaction badges (public companies only) ──────────
+        # ── Price reaction block (public companies only) ──────────
         pr = fetch_price_reaction(event.get("id"))
-        price_badges = []
+        price_block_html = ""
         if pr and pr.get("price_at_event"):
             p0 = pr["price_at_event"]
             ticker = pr.get("ticker", "")
-            price_badges.append(f'<span class="pcc-source-caption" style="font-weight:600;">{ticker} ${p0:.2f}</span>')
-            for label, key in [("inter-event", "window_return_pct"), ("1d", "reaction_1d"), ("3d", "reaction_3d"), ("7d", "reaction_7d")]:
-                val = pr.get(key)
-                if val is not None:
-                    clr = "#1a7f37" if val > 0 else ("#cf222e" if val < 0 else "#6e7781")
-                    sign = "+" if val > 0 else ""
-                    price_badges.append(
-                        f'<span class="score-pill" style="background:{clr};color:#fff;font-size:0.72rem;">'
-                        f'{label}: {sign}{val:.2f}%</span>'
-                    )
-            conf = pr.get("confidence", "")
-            if conf:
-                conf_clr = {"high": "#0071E3", "medium": "#6e7781", "low": "#cf222e"}.get(conf, "#6e7781")
-                price_badges.append(
-                    f'<span class="pcc-source-caption" style="color:{conf_clr};">attribution: {conf}</span>'
+            conf = (pr.get("confidence") or "").lower()
+            conf_reason = (pr.get("confidence_reason") or "").strip()
+            session = (pr.get("market_session") or "").replace("_", " ").title()
+
+            # Confidence styling
+            conf_clr  = {"high": "#16a34a", "medium": "#ca8a04", "low": "#dc2626"}.get(conf, "#6b7280")
+            conf_bg   = {"high": "rgba(22,163,74,0.10)", "medium": "rgba(202,138,4,0.10)", "low": "rgba(220,38,38,0.10)"}.get(conf, "rgba(107,114,128,0.08)")
+            conf_icon = {"high": "●", "medium": "◑", "low": "○"}.get(conf, "○")
+
+            # Build individual return cells
+            def _ret_cell(label: str, val: Optional[float], primary: bool = False) -> str:
+                if val is None:
+                    return ""
+                clr  = "#16a34a" if val > 0 else ("#dc2626" if val < 0 else "#6b7280")
+                sign = "+" if val > 0 else ""
+                size = "1rem" if primary else "0.8rem"
+                weight = "800" if primary else "600"
+                return (
+                    f'<div style="display:flex;flex-direction:column;align-items:center;gap:2px;">'
+                    f'<span style="font-size:{size};font-weight:{weight};color:{clr};">{sign}{val:.2f}%</span>'
+                    f'<span style="font-size:0.63rem;font-weight:600;color:#86868B;text-transform:uppercase;letter-spacing:0.06em;">{label}</span>'
+                    f'</div>'
                 )
 
-        all_badges_html = "".join(badges)
-        if price_badges:
-            all_badges_html += '<span style="margin-left:12px;border-left:1px solid #d2d2d7;padding-left:12px;">' + "".join(price_badges) + "</span>"
+            cells = "".join(filter(None, [
+                _ret_cell("1d return", pr.get("reaction_1d"), primary=True),
+                _ret_cell("3d", pr.get("reaction_3d")),
+                _ret_cell("7d", pr.get("reaction_7d")),
+                _ret_cell("inter-event", pr.get("window_return_pct")),
+            ]))
+
+            conf_pill = (
+                f'<span style="display:inline-flex;align-items:center;gap:5px;padding:3px 10px;'
+                f'background:{conf_bg};border-radius:980px;font-size:0.72rem;font-weight:600;color:{conf_clr};">'
+                f'{conf_icon} {conf.capitalize()} attribution confidence</span>'
+            )
+            reason_html = (
+                f'<span style="font-size:0.72rem;color:#86868B;margin-left:6px;">{_he(conf_reason)}</span>'
+                if conf_reason else ""
+            )
+            session_html = (
+                f'<span style="font-size:0.72rem;color:#86868B;margin-left:8px;">· {_he(session)} session</span>'
+                if session else ""
+            )
+
+            price_block_html = (
+                f'<div style="margin:14px 0 10px 0;padding:14px 18px;'
+                f'background:rgba(0,0,0,0.03);border-radius:14px;border:1px solid rgba(0,0,0,0.06);">'
+                f'<div style="display:flex;align-items:center;gap:6px;margin-bottom:10px;">'
+                f'<span style="font-size:0.7rem;font-weight:700;color:#86868B;letter-spacing:0.08em;text-transform:uppercase;">Price Impact · {_he(ticker)} ${p0:.2f}</span>'
+                f'{session_html}'
+                f'</div>'
+                f'<div style="display:flex;align-items:flex-end;gap:24px;flex-wrap:wrap;margin-bottom:10px;">'
+                f'{cells}'
+                f'</div>'
+                f'<div style="display:flex;align-items:center;flex-wrap:wrap;">'
+                f'{conf_pill}{reason_html}'
+                f'</div>'
+                f'</div>'
+            )
 
         st.markdown(
-            f'<div class="pcc-badge-row">{all_badges_html}</div>',
+            f'<div class="pcc-badge-row">{"".join(badges)}</div>'
+            + price_block_html,
             unsafe_allow_html=True,
         )
 
@@ -1134,8 +1442,9 @@ def render_event_card(event: dict, sentiments: list) -> None:
                 return '<span class="pcc-empty">None recorded.</span>'
             parts = []
             for quote, url in voice[:6]:
+                source_name = _source_label(url) if url else ""
                 link = (
-                    f'<a href="{url}" target="_blank" class="pcc-source-link">View source →</a>'
+                    f'<a href="{url}" target="_blank" class="pcc-source-link">— {_he(source_name)}</a>'
                     if url else ""
                 )
                 parts.append(f'<div class="pcc-quote">{_he(quote)}{link}</div>')
@@ -1143,9 +1452,11 @@ def render_event_card(event: dict, sentiments: list) -> None:
 
         pros_col = f'<div><div class="pcc-label">Pros</div>{_build_bullets(agg["pros"])}</div>'
         cons_col = f'<div><div class="pcc-label">Cons</div>{_build_bullets(agg["cons"])}</div>'
-        voice_col = f'<div><div class="pcc-label">Voice of the Customer</div>{_build_quotes(agg["voice"])}</div>'
+        has_voice = bool(agg["voice"])
+        voice_col = f'<div><div class="pcc-label">Voice of the Customer</div>{_build_quotes(agg["voice"])}</div>' if has_voice else ""
+        grid_cols = "1fr 1fr 1fr" if has_voice else "1fr 1fr"
         st.markdown(
-            f'<div class="pcc-grid">{pros_col}{cons_col}{voice_col}</div>',
+            f'<div class="pcc-grid" style="grid-template-columns:{grid_cols};">{pros_col}{cons_col}{voice_col}</div>',
             unsafe_allow_html=True,
         )
 
@@ -1311,7 +1622,7 @@ def _build_score_timeseries(score_rows: list, lookback_days: int) -> "pd.DataFra
             continue
         raw = r.get("created_at") or ""
         try:
-            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            dt = _parse_iso_dt(raw)
         except Exception:
             continue
         if dt < cutoff:
@@ -1376,17 +1687,25 @@ def _render_price_chart(target_id: int, target: dict, events: list) -> None:
 
     chart = line
     if event_markers:
-        df_ev = pd.DataFrame(event_markers)
-        dots = (
-            alt.Chart(df_ev)
-            .mark_point(shape="triangle-up", size=80, filled=True, color="#FF9F0A")
-            .encode(
-                x=alt.X("date:T"),
-                y=alt.value(20),
-                tooltip=[alt.Tooltip("date:T", format="%b %d %Y"), alt.Tooltip("headline:N", title="Event")],
+        # Look up the close price on each event date so markers sit on the line
+        price_by_date = {row["date"].strftime("%Y-%m-%d"): row["close"] for _, row in df.iterrows()}
+        markers_with_price = [
+            {**m, "close": price_by_date.get(m["date"].strftime("%Y-%m-%d"))}
+            for m in event_markers
+            if price_by_date.get(m["date"].strftime("%Y-%m-%d")) is not None
+        ]
+        if markers_with_price:
+            df_ev = pd.DataFrame(markers_with_price)
+            dots = (
+                alt.Chart(df_ev)
+                .mark_point(shape="triangle-up", size=120, filled=True, color="#FF9F0A")
+                .encode(
+                    x=alt.X("date:T"),
+                    y=alt.Y("close:Q"),
+                    tooltip=[alt.Tooltip("date:T", format="%b %d %Y"), alt.Tooltip("headline:N", title="Event")],
+                )
             )
-        )
-        chart = alt.layer(line, dots)
+            chart = alt.layer(line, dots)
 
     st.altair_chart(
         chart.properties(height=280, background="transparent")
@@ -1575,6 +1894,111 @@ def render_compare_tab(targets: list) -> None:
             render_target_compare_card(target, score_rows, sentiment_rows)
 
 
+def render_news_tab(targets: list) -> None:
+    """Global news feed: headlines for a selected date, newest first."""
+    from datetime import datetime, timezone, timedelta, date as date_type
+
+    st.markdown(
+        '<div class="section-head">News Feed</div>'
+        '<div class="section-sub">All tracked headlines for the selected day, newest first.</div>',
+        unsafe_allow_html=True,
+    )
+
+    targets_by_id = {t["id"]: t for t in targets if t.get("id")}
+
+    col_date, col_sector = st.columns([1, 2])
+    with col_date:
+        selected_date = st.date_input("Date", value=date_type.today(), max_value=date_type.today(), key="news_date_picker", label_visibility="collapsed")
+    with col_sector:
+        all_sectors = sorted({(t.get("sector") or "").strip() for t in targets if (t.get("sector") or "").strip()})
+        sel_sectors = st.multiselect("Sector", all_sectors, placeholder="All sectors", key="news_sector_filter", label_visibility="collapsed")
+
+    # Compute lookback in hours from start of selected date to end of it
+    now_utc = datetime.now(timezone.utc)
+    selected_start = datetime(selected_date.year, selected_date.month, selected_date.day, tzinfo=timezone.utc)
+    selected_end = selected_start + timedelta(days=1)
+    lookback_hours = max(1, int((now_utc - selected_start).total_seconds() // 3600) + 1)
+
+    events, sentiment_map = fetch_todays_headlines(lookback_hours)
+    # Narrow to the selected day window
+    events = [e for e in events if selected_start <= _parse_iso_dt(e["created_at"]) < selected_end]
+
+    if not events:
+        st.info("No headlines tracked in the last 24 hours. Run the pipeline to fetch today's news.")
+        return
+
+    # Filter by sector if selected
+    if sel_sectors:
+        events = [e for e in events if (targets_by_id.get(e.get("target_id"), {}).get("sector") or "") in sel_sectors]
+
+    if not events:
+        st.caption("No headlines match the selected sector filter.")
+        return
+
+    tag_emoji = {"threat": "🔴", "opportunity": "🟢", "monitor": "🟡", "no_action": "⚪"}
+    now = datetime.now(timezone.utc)
+
+    for e in events:
+        eid = e.get("id")
+        target = targets_by_id.get(e.get("target_id"), {})
+        company = target.get("name") or "Unknown"
+        sector = (target.get("sector") or "").strip()
+        headline = (e.get("headline") or "").strip() or "(no headline)"
+
+        # Relative time
+        try:
+            evt_dt = _parse_iso_dt(e["created_at"])
+            delta = now - evt_dt
+            hours = int(delta.total_seconds() // 3600)
+            mins = int((delta.total_seconds() % 3600) // 60)
+            age = f"{hours}h ago" if hours > 0 else f"{mins}m ago"
+        except Exception:
+            age = ""
+
+        sent = sentiment_map.get(eid, {})
+        score = sent.get("score")
+        tag = sent.get("tag") or ""
+        desc = sent.get("desc") or ""
+
+        # Score color
+        score_color = "#6b7280"
+        if score is not None:
+            if score >= 7: score_color = "#16a34a"
+            elif score >= 3: score_color = "#65a30d"
+            elif score <= -7: score_color = "#dc2626"
+            elif score <= -3: score_color = "#ea580c"
+
+        score_badge = (
+            f'<span style="background:{score_color};color:#fff;font-size:0.72rem;'
+            f'font-weight:700;padding:2px 8px;border-radius:20px;">'
+            f'{score:+d}</span>' if score is not None else ""
+        )
+        tag_badge = (
+            f'<span style="font-size:0.8rem;margin-left:4px;">{tag_emoji.get(tag, "")} {tag}</span>'
+            if tag else ""
+        )
+        sector_pill = (
+            f'<span style="font-size:0.72rem;color:#A1A1A6;background:rgba(255,255,255,0.06);'
+            f'padding:2px 8px;border-radius:20px;margin-left:6px;">{_he(sector)}</span>'
+            if sector else ""
+        )
+
+        st.markdown(
+            f'<div style="border:1px solid rgba(255,255,255,0.08);border-radius:12px;'
+            f'padding:14px 18px;margin-bottom:10px;background:rgba(255,255,255,0.03);">'
+            f'<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">'
+            f'<span style="font-size:0.82rem;font-weight:700;color:#F5F5F7;">{_he(company)}</span>'
+            f'{sector_pill}'
+            f'<span style="margin-left:auto;font-size:0.72rem;color:#6b7280;">{age}</span>'
+            f'</div>'
+            f'<div style="font-size:0.92rem;font-weight:600;color:#E5E5EA;margin-bottom:6px;">{_he(headline)}</div>'
+            f'<div style="display:flex;align-items:center;gap:6px;">{score_badge}{tag_badge}</div>'
+            + (f'<div style="font-size:0.8rem;color:#A1A1A6;margin-top:8px;line-height:1.5;">{_he(desc)}</div>' if desc else "")
+            + f'</div>',
+            unsafe_allow_html=True,
+        )
+
+
 def render_rankings_tab(targets: list) -> None:
     """Leaderboard: all tracked targets ranked by avg sentiment score."""
     st.markdown(
@@ -1587,7 +2011,7 @@ def render_rankings_tab(targets: list) -> None:
     event_counts = fetch_event_count_by_target()
 
     rows = []
-    for t in targets:
+    for t in [t for t in targets if (t.get("target_type") or "").upper() == "COMPANY"]:
         t_id = t.get("id")
         t_name = t.get("name") or "Unknown"
         ttype = (t.get("target_type") or "").capitalize()
@@ -1608,6 +2032,7 @@ def render_rankings_tab(targets: list) -> None:
         st.info("No targets to rank yet.")
         return
 
+    _MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
     html_rows = []
     for i, r in enumerate(rows_sorted, 1):
         if r["avg_score"] is not None:
@@ -1616,8 +2041,15 @@ def render_rankings_tab(targets: list) -> None:
                 f'<span class="score-pill" style="background:{color};color:#fff;">'
                 f'{r["avg_score"]:+d} {_score_label(r["avg_score"])}</span>'
             )
+            bar_pct = round((r["avg_score"] + 10) / 20 * 100)
+            bar_html = (
+                f'<div class="rank-bar-track">'
+                f'<div style="height:100%;width:{bar_pct}%;background:{color};border-radius:3px;"></div>'
+                f'</div>'
+            )
         else:
             score_cell = '<span class="rank-meta">—</span>'
+            bar_html = ""
 
         m = r["momentum"]
         if m is None:
@@ -1629,21 +2061,29 @@ def render_rankings_tab(targets: list) -> None:
         else:
             trend_html = '<span class="rank-meta">→ 0</span>'
 
-        html_rows.append(f"""
-        <div class="rank-row">
-          <span class="rank-num">{i}</span>
-          <div class="rank-name-wrap">
-            <div class="rank-name">{_he(r["name"])}</div>
-            <div class="rank-type">{_he(r["type"])}</div>
-          </div>
-          <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
-            {score_cell}
-            {trend_html}
-            <span class="rank-meta">{r["events"]} events</span>
-            <span class="rank-meta">{r["readings"]} readings</span>
-          </div>
-        </div>
-        """)
+        rank_cell = (
+            f'<span class="rank-medal">{_MEDALS[i]}</span>'
+            if i in _MEDALS
+            else f'<span class="rank-num">{i}</span>'
+        )
+
+        html_rows.append(
+            f'<div class="rank-row">'
+            f'{rank_cell}'
+            f'<div class="rank-name-wrap">'
+            f'<div class="rank-name">{_he(r["name"])}</div>'
+            f'<div style="display:flex;align-items:center;gap:8px;">'
+            f'<div class="rank-type">{_he(r["type"])}</div>'
+            f'{bar_html}'
+            f'</div>'
+            f'</div>'
+            f'<div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">'
+            f'{score_cell}{trend_html}'
+            f'<span class="rank-meta">{r["events"]} events</span>'
+            f'<span class="rank-meta">{r["readings"]} readings</span>'
+            f'</div>'
+            f'</div>'
+        )
 
     st.markdown("".join(html_rows), unsafe_allow_html=True)
 
@@ -1663,11 +2103,21 @@ def render_rankings_tab(targets: list) -> None:
 # -----------------------------------------------------------------------------
 def main():
     _inject_custom_css()
+
+    # Gradient mesh background blobs
+    st.markdown(
+        '<div class="mesh-blob mesh-b1"></div>'
+        '<div class="mesh-blob mesh-b2"></div>'
+        '<div class="mesh-blob mesh-b3"></div>',
+        unsafe_allow_html=True,
+    )
+
     if "selected_target_id" not in st.session_state:
         st.session_state["selected_target_id"] = None
 
     try:
         targets = fetch_targets()
+        st.session_state["_targets_by_id"] = {t["id"]: t for t in targets if t.get("id")}
     except Exception as e:
         st.error(
             "**Could not load targets from Supabase.** Check Streamlit Cloud → Settings → Secrets: "
@@ -1700,8 +2150,29 @@ def main():
         st.code("\n".join(err_parts), language="text")
         st.stop()
 
-    selected_id = render_sidebar(targets, st.session_state["selected_target_id"])
+    view, selected_id = render_sidebar(targets, st.session_state["selected_target_id"])
     st.session_state["selected_target_id"] = selected_id
+
+    # Sticky page header
+    target_name_for_header = next(
+        (t.get("name") for t in targets if t.get("id") == selected_id), None
+    ) if selected_id else None
+    sep_html = (
+        f'<span class="ph-sep">/</span><span class="ph-target">{_he(target_name_for_header)}</span>'
+        if target_name_for_header else ""
+    )
+    st.markdown(
+        f'<div class="page-header">'
+        f'<span class="ph-title">Market Intelligence</span>'
+        f'{sep_html}'
+        f'<div class="ph-live"><div class="live-dot"></div>Live</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    if view == "News Feed":
+        render_news_tab(targets)
+        return
 
     tab_dive, tab_compare, tab_rank, tab_brief = st.tabs(["Deep Dive", "Compare", "Rankings", "Weekly Brief"])
 
@@ -1747,8 +2218,10 @@ def main():
                     "Sentiment for this target."
                     + (" From **target_sentiment_summary** (rule-based consolidated)." if has_summary else " From **ungrouped sentiment** rows (no summary for this target yet).")
                 )
-                pros_display = _to_bullet_lines(summary["pros"] or "") if has_summary else agg["pros"]
-                cons_display = _to_bullet_lines(summary["cons"] or "") if has_summary else agg["cons"]
+                # Always run dedupe_lines so stored summary text (which is never deduplicated)
+                # gets the same near-duplicate filtering as freshly aggregated rows.
+                pros_display = _dedupe_lines(_to_bullet_lines(summary["pros"] or "")) if has_summary else agg["pros"]
+                cons_display = _dedupe_lines(_to_bullet_lines(summary["cons"] or "")) if has_summary else agg["cons"]
                 sources = list({(s.get("source_url") or "").strip() for s in meaningful_ungrouped if (s.get("source_url") or "").strip()})
                 col1, col2, col3 = st.columns(3)
                 with col1:

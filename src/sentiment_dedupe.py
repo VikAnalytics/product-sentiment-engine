@@ -33,13 +33,32 @@ def significant_words(text: str) -> set:
     return words - DEDUPE_STOPWORDS
 
 
-def line_similarity(line_a: str, line_b: str, min_overlap: float = 0.55) -> bool:
-    """True if the two lines express the same idea (high word overlap). Keeps one, drop the other."""
+def _bigrams(text: str) -> set:
+    """Return all consecutive 2-word pairs from normalized text."""
+    tokens = normalize_for_dedupe(text).split()
+    if len(tokens) < 2:
+        return set()
+    return {(tokens[i], tokens[i + 1]) for i in range(len(tokens) - 1)}
+
+
+def line_similarity(line_a: str, line_b: str, min_overlap: float = 0.42) -> bool:
+    """True if the two lines express the same idea.
+
+    Primary check: word-overlap ratio over significant words (stopwords removed).
+    Secondary check: 4+ shared significant words AND at least one shared 2-word phrase —
+    catches bullets that are about the same named concept (e.g. "constructor theory is weak")
+    vs ("constructor theory lacks practical guidance") even when the ratio falls below 0.42.
+    """
     wa, wb = significant_words(line_a), significant_words(line_b)
     if not wa or not wb:
         return False
-    overlap = len(wa & wb) / min(len(wa), len(wb))
-    return overlap >= min_overlap
+    shared = wa & wb
+    if len(shared) / min(len(wa), len(wb)) >= min_overlap:
+        return True
+    # Secondary: same named concept + same conclusion
+    if len(shared) >= 4 and (_bigrams(line_a) & _bigrams(line_b)):
+        return True
+    return False
 
 
 def dedupe_lines(lines: list) -> list:

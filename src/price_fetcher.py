@@ -104,8 +104,15 @@ def run_price_fetcher():
             # Upsert in batches of 500 to stay within PostgREST limits
             for i in range(0, len(rows), 500):
                 batch = rows[i : i + 500]
-                sb.table("stock_prices").upsert(batch, on_conflict="target_id,ts").execute()
-                rows_inserted += len(batch)
+                try:
+                    resp = sb.table("stock_prices").upsert(batch, on_conflict="target_id,ts").execute()
+                    # supabase-py may return error in response instead of raising — check explicitly
+                    if hasattr(resp, "error") and resp.error:
+                        log.error("  Upsert error for %s (target %s): %s", ticker, tid, resp.error)
+                        continue
+                    rows_inserted += len(batch)
+                except Exception as exc:
+                    log.error("  Upsert failed for %s (target %s): %s", ticker, tid, exc)
 
         log.info("  %s → %d bars × %d target(s) = %d rows upserted", ticker, len(bars), len(target_ids), rows_inserted)
         total_rows += rows_inserted

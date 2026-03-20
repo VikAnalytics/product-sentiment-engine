@@ -1,9 +1,9 @@
-# Streamlit theme: clean light look, teal accent
 [theme]
-primaryColor = "#0d9488"
-backgroundColor = "#ffffff"
-secondaryBackgroundColor = "#f8fafc"
-textColor = "#1e293b"
+base = "dark"
+primaryColor = "#2997FF"
+backgroundColor = "#0A0E1A"
+secondaryBackgroundColor = "#111827"
+textColor = "#F5F5F7"
 font = "sans serif"
 
 [server]

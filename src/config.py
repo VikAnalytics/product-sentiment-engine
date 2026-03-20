@@ -25,6 +25,7 @@ LOOKBACK_DAYS = 1
 MAX_PAYLOAD_CHARS_PER_FIELD = 2000  # truncate long pros/cons in report payload to avoid token limits
 MAX_CHATTER_CHARS = 3000            # truncate combined chatter before sending to AI (token savings)
 EVENT_MAX_AGE_DAYS = 14             # skip events older than this in the tracker (avoids dead HTTP calls)
+REPORT_EVENT_MAX_AGE_DAYS = 3      # only include events created within this many days in the daily report
 
 _supabase_client = None
 _openai_client = None

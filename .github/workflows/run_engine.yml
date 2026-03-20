@@ -3,7 +3,8 @@ name: Daily Sentiment Engine
 on:
   workflow_dispatch: # Allows cron-job.org or manual triggers
   schedule:
-    - cron: '0 7 * * 1'  # Every Monday at 07:00 UTC — also runs weekly brief
+    - cron: '0 7 * * *'  # Every day at 07:00 UTC
+    - cron: '0 7 * * 1'  # Every Monday at 07:00 UTC — triggers weekly brief
 
 jobs:
   run-pipeline:
@@ -43,7 +44,7 @@ jobs:
           PYTHONPATH=src python src/report.py
 
       - name: Run Weekly Brief (Mondays only)
-        if: github.event_name == 'schedule'
+        if: github.event.schedule == '0 7 * * 1'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}

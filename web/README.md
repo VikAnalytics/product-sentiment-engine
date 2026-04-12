@@ -1,36 +1,95 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Market Intelligence Engine — Web Dashboard
 
-## Getting Started
+Next.js 16 (App Router) dashboard for the Market Intelligence Engine. Deployed on Vercel.
 
-First, run the development server:
+**Live:** https://market-intelligence-engine-five.vercel.app
+
+---
+
+## Local Development
 
 ```bash
+cd web
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### Environment Variables
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Create `web/.env.local`:
 
-## Learn More
+```bash
+NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJ...
+```
 
-To learn more about Next.js, take a look at the following resources:
+Use the **anon** key (not service_role). Get both from Supabase → Project Settings → API.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+---
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Structure
 
-## Deploy on Vercel
+```
+web/
+├── app/
+│   ├── layout.tsx          Root layout — fonts, globals, dynamic export
+│   ├── page.tsx            Entry point — view state, sidebar + main area
+│   └── globals.css         CSS variables, grain texture, keyframes, utilities
+├── components/
+│   ├── TopBar.tsx          48px header — clock, title, live indicator
+│   ├── Sidebar.tsx         Nav (News Feed / Analysis / Simulator), sector filter, company list
+│   ├── NewsFeed.tsx        Chronological headline feed with score + tag badges
+│   ├── Analysis.tsx        Deep Dive / Compare / Rankings tabs
+│   ├── Simulator.tsx       Portfolio summary, positions, trade log, growth chart
+│   └── Logo.tsx            Company logo with fallback: logo_url → favicon → initials
+├── lib/
+│   ├── supabase.ts         Supabase client + all DB query helpers + TypeScript types
+│   └── utils.ts            Score color classes, tag labels, formatters (USD, %, relative time)
+└── public/                 Static assets
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+---
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Design System
+
+Dark theme. CSS variables defined in `globals.css`:
+
+| Variable | Use |
+|----------|-----|
+| `--bg` | Page background (`#0a0a08`) |
+| `--gold` | Primary accent (headlines, icons) |
+| `--green` / `--red` / `--amber` | Sentiment colors |
+| `--ff-d` | Display font (Cormorant Garamond) |
+| `--ff-m` | Monospace font (Space Mono) |
+| `--ff-b` | Body font (Crimson Pro) |
+
+Score color bands:
+
+| Score | Color |
+|-------|-------|
+| ≥ 7 | Green |
+| 3 – 6 | Lime |
+| −2 – +2 | Gray (neutral) |
+| −6 – −3 | Amber |
+| ≤ −7 | Red |
+
+---
+
+## Key Query Helpers (`lib/supabase.ts`)
+
+| Function | Returns |
+|----------|---------|
+| `fetchTargets()` | All tracked targets with sector, ticker, logo |
+| `fetchAllTargetScores()` | Avg sentiment score per target (last 30 days) |
+| `fetchRecentHeadlines(hours)` | News feed — events joined with scores + tags |
+| `fetchTargetWithEvents(id)` | Single target with full event + price reaction data |
+| `fetchSimData()` | All 5 simulator tables in parallel |
+| `fetchLatestPricesForTickers(tickers)` | Latest close price per ticker |
+
+---
+
+## Deployment
+
+Auto-deploys from `main` via Vercel. See [docs/DEPLOY.md](../docs/DEPLOY.md) for full setup instructions.

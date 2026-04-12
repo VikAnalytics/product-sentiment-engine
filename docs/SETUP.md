@@ -180,13 +180,22 @@ Computes current portfolio value (cash + market value of holdings), records P&L 
 
 ---
 
-## 5. Run the Dashboard Locally
+## 5. Run the Web Dashboard Locally
 
 ```bash
-PYTHONPATH=src streamlit run src/app.py
+cd web
+npm install
+npm run dev
 ```
 
-Requires `SUPABASE_URL` and `SUPABASE_KEY` in `.env`. For deployment to Streamlit Community Cloud, see [DEPLOY.md](DEPLOY.md) (same folder).
+Open [http://localhost:3000](http://localhost:3000). Requires `web/.env.local` with:
+
+```bash
+NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJ...
+```
+
+Use the **anon** key (not service_role). For Vercel deployment, see [DEPLOY.md](DEPLOY.md).
 
 ---
 

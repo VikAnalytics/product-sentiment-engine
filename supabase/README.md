@@ -23,7 +23,7 @@ All tables, indexes, and the `match_sentiment` RPC are defined in `migrations/`.
 | `012_stock_prices.sql` | Creates `stock_prices` table (`target_id`, `ts TIMESTAMPTZ`, `open`, `high`, `low`, `close`, `volume`). Unique constraint on `(target_id, ts)`. |
 | `013_price_reactions.sql` | Creates `price_reactions` table with inter-event attribution fields (`price_at_event`, `window_return_pct`, `reaction_1d/3d/7d`, `confidence`, etc.). |
 | `014_sector.sql` | Adds `sector VARCHAR(60)` and `is_f500 BOOLEAN DEFAULT FALSE` to `targets`. |
-| `015_simulator.sql` | Creates AI stock simulator tables: `sim_portfolio`, `sim_holdings`, `sim_trades`, `sim_pending_trades`, `sim_snapshots`. Seeds the starting $1,000 portfolio row. |
+| `015_simulator.sql` | Creates AI stock simulator tables: `sim_portfolio`, `sim_holdings`, `sim_trades`, `sim_pending_trades`, `sim_snapshots`. Seeds the starting $1,000 portfolio row. **Note:** if applied before `peak_value` was added, run: `ALTER TABLE public.sim_portfolio ADD COLUMN IF NOT EXISTS peak_value NUMERIC(12,2) NOT NULL DEFAULT 1000.00;` |
 | `016_rls_remaining_tables.sql` | Enables RLS + read-only anon policies on `stock_prices`, `price_reactions`, `target_sentiment_summary`, and all `sim_*` tables (missed by migration 006). |
 
 ---

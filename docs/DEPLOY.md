@@ -1,77 +1,102 @@
-# Deploying the Dashboard
+# Deploying the Web Dashboard
 
-Deploy to **Streamlit Community Cloud** (free tier) so the dashboard is accessible online.
+The dashboard is a Next.js app in `web/` deployed to **Vercel**. It auto-deploys on every push to `main`.
 
 ---
 
-## 1. Push Code to GitHub
+## Live URL
 
-Ensure your repo is on GitHub and up to date:
+**Production:** https://market-intelligence-engine-five.vercel.app
+
+---
+
+## Prerequisites
+
+- The GitHub repo is connected to the Vercel project (already configured).
+- Two environment variables set in Vercel → Project → Settings → Environment Variables:
+  - `NEXT_PUBLIC_SUPABASE_URL`
+  - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+
+Use the **anon** (public) key — not the service_role key. RLS policies in migrations `006` and `016` grant read access to the anon key.
+
+---
+
+## Deploying
+
+Every push to `main` triggers an automatic Vercel build. No manual steps needed.
+
+To deploy manually from the CLI:
 
 ```bash
-git push origin main
+cd web
+vercel --prod
 ```
 
 ---
 
-## 2. Deploy on Streamlit Community Cloud
+## First-Time Setup (if starting from scratch)
 
-1. Go to [share.streamlit.io](https://share.streamlit.io) and sign in with GitHub.
-2. Click **New app**.
-3. Set the following:
-   - **Repository:** `VikAnalytics/product-sentiment-engine`
-   - **Branch:** `main`
-   - **Main file path:** `src/app.py`
-4. Click **Advanced settings** and set **Python version** to `3.11`.
-5. Add secrets (same page, or later via app **Settings → Secrets**):
+### 1. Install Vercel CLI
 
-   ```toml
-   SUPABASE_URL = "https://your-project.supabase.co"
-   SUPABASE_KEY = "your-service-role-key"
-   ```
+```bash
+npm install -g vercel
+```
 
-   Use the **service_role** key. The dashboard is read-only — it never writes to Supabase — so service_role is safe and avoids RLS issues. If you prefer the anon key, apply migration `006_rls_read_policies.sql` first.
+### 2. Link the project
 
-   `OPENAI_API_KEY` is **not** required for the dashboard.
+```bash
+cd web
+vercel link
+```
 
-6. Click **Deploy**. First boot takes a few minutes (install + model download).
+### 3. Set environment variables
 
----
+```bash
+vercel env add NEXT_PUBLIC_SUPABASE_URL
+vercel env add NEXT_PUBLIC_SUPABASE_ANON_KEY
+```
 
-## 3. Apply Supabase Migrations
+Select **All** environments (Production, Preview, Development) when prompted.
 
-Before the dashboard loads correctly, all migrations in `supabase/migrations/` (`000` through `015`) must be applied to your Supabase project. See [supabase/README.md](../supabase/README.md).
+### 4. Connect GitHub for auto-deploy
 
-Migration `006_rls_read_policies.sql` is required if you are using the anon key.
+Vercel Dashboard → Project → Settings → Git → Connect Git Repository → select `VikAnalytics/product-sentiment-engine`.
 
----
+Set **Root Directory** to `web` in Vercel Dashboard → Project → Settings → General.
 
-## 4. After Deployment
+### 5. Apply Supabase migrations
 
-- Your app will be at `https://your-app-name.streamlit.app`.
-- To update: push to `main` — Streamlit Cloud redeploys automatically.
-- To change secrets or settings: open the app on share.streamlit.io → **Settings**.
+Before the dashboard loads correctly, all migrations in `supabase/migrations/` (`000` through `016`) must be applied. See [supabase/README.md](../supabase/README.md).
 
 ---
 
-## 5. Troubleshooting
+## Environment Variables
 
-### White-on-white dropdowns or wrong colors
+| Variable | Value | Notes |
+|----------|-------|-------|
+| `NEXT_PUBLIC_SUPABASE_URL` | `https://xxx.supabase.co` | Supabase → Project Settings → API |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | `eyJ...` | Supabase → Project Settings → API → anon key |
 
-The app uses a dark theme. Ensure `.streamlit/config.toml` contains `base = "dark"`. If it reverts to `base = "light"`, native Streamlit components (dropdowns, selectboxes) will render with white text on a white background.
+`NEXT_PUBLIC_` prefix means these values are embedded at build time and visible in the browser bundle. The anon key is safe to expose — it is rate-limited and restricted by RLS policies.
 
-### API error on first load
+---
 
-- Verify the `SUPABASE_URL` and `SUPABASE_KEY` secrets are set correctly in Streamlit Cloud (Settings → Secrets).
-- Paste the full service_role key with no leading/trailing whitespace.
-- Confirm the key belongs to the same Supabase project as the URL.
+## Troubleshooting
+
+### Build error: "Couldn't find any pages or app directory"
+
+Vercel is building from the repo root instead of `web/`. Fix: Vercel Dashboard → Project → Settings → General → Root Directory → set to `web`.
+
+### Build error: "supabaseUrl is required"
+
+Environment variables are not set. Run `vercel env ls` to verify. If missing, add them with `vercel env add`.
+
+### Data not loading
+
+- Verify `NEXT_PUBLIC_SUPABASE_ANON_KEY` is the anon key (not service_role).
+- Confirm migrations `006_rls_read_policies.sql` and `016_rls_remaining_tables.sql` are applied — these grant read access to the anon key.
+- Open browser DevTools → Network tab — look for failed Supabase requests and check the error message.
 
 ### Stale build after a code push
 
-Streamlit Cloud may serve a cached build. Force a redeploy from the app dashboard (three-dot menu → **Reboot app**).
-
----
-
-## Note on Dependencies
-
-Streamlit Community Cloud resolves dependencies from `src/requirements.txt` when the main file path is `src/app.py`. This is a lighter set (dashboard-only) compared to the root `requirements.txt` (full pipeline including spaCy, sentence-transformers, yfinance). This keeps dashboard deploys fast.
+Vercel builds automatically on every push. If it hasn't triggered, check the Vercel dashboard → Deployments for build status and errors.

@@ -24,6 +24,7 @@ All tables, indexes, and the `match_sentiment` RPC are defined in `migrations/`.
 | `013_price_reactions.sql` | Creates `price_reactions` table with inter-event attribution fields (`price_at_event`, `window_return_pct`, `reaction_1d/3d/7d`, `confidence`, etc.). |
 | `014_sector.sql` | Adds `sector VARCHAR(60)` and `is_f500 BOOLEAN DEFAULT FALSE` to `targets`. |
 | `015_simulator.sql` | Creates AI stock simulator tables: `sim_portfolio`, `sim_holdings`, `sim_trades`, `sim_pending_trades`, `sim_snapshots`. Seeds the starting $1,000 portfolio row. |
+| `016_rls_remaining_tables.sql` | Enables RLS + read-only anon policies on `stock_prices`, `price_reactions`, `target_sentiment_summary`, and all `sim_*` tables (missed by migration 006). |
 
 ---
 

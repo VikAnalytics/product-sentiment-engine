@@ -99,7 +99,7 @@ def _search_query_from_context(name: str, target_type: str, description: str) ->
 def search_hacker_news(query: str) -> str:
     """Fetch recent HN comments for the query. Returns combined text or empty string on error."""
     yesterday_timestamp = int(time.time()) - (24 * 3600)
-    url = f"https://hn.algolia.com/api/v1/search_by_date?query={query}&tags=comment&numericFilters=created_at_i>{yesterday_timestamp}"
+    url = f"https://hn.algolia.com/api/v1/search_by_date?query={requests.utils.quote(query)}&tags=comment&numericFilters=created_at_i>{yesterday_timestamp}"
     try:
         response = requests.get(url, timeout=HTTP_TIMEOUT_SEC)
         response.raise_for_status()
@@ -170,7 +170,7 @@ def search_stocktwits(ticker: str) -> str:
     """Fetch latest StockTwits messages for a ticker. No auth required for public streams."""
     if not ticker:
         return ""
-    url = f"https://api.stocktwits.com/api/2/streams/symbol/{ticker}.json"
+    url = f"https://api.stocktwits.com/api/2/streams/symbol/{requests.utils.quote(ticker)}.json"
     try:
         response = requests.get(url, timeout=HTTP_TIMEOUT_SEC)
         if response.status_code != 200:
@@ -194,7 +194,7 @@ def search_yahoo_finance_ticker(ticker: str) -> str:
     if not ticker:
         return ""
     import feedparser
-    url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US"
+    url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={requests.utils.quote(ticker)}&region=US&lang=en-US"
     try:
         feed = feedparser.parse(url)
         entries = (getattr(feed, "entries", None) or [])[:5]

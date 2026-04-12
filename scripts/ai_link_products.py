@@ -1,5 +1,6 @@
 """
 ai_link_products.py — Use OpenAI to identify parent companies for unlinked product targets.
+If the parent company doesn't exist in the DB, it is created (with domain + logo resolved).
 
 Usage:
     PYTHONPATH=src python scripts/ai_link_products.py           # preview only (dry run)
@@ -16,18 +17,21 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from config import get_supabase, get_json_model
 from normalize import normalize_target_name
+from domain_resolver import resolve_domain
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger(__name__)
 
-BATCH_SIZE = 50  # products per AI call
+BATCH_SIZE = 50
 
 
 def fetch_unlinked_products(sb):
     rows = []
     offset = 0
     while True:
-        resp = sb.table("targets").select("id, name").eq("target_type", "PRODUCT").is_("parent_target_id", "null").range(offset, offset + 999).execute()
+        resp = (sb.table("targets").select("id, name")
+                .eq("target_type", "PRODUCT").is_("parent_target_id", "null")
+                .range(offset, offset + 999).execute())
         batch = resp.data or []
         rows.extend(batch)
         if len(batch) < 1000:
@@ -40,7 +44,9 @@ def fetch_companies(sb):
     rows = []
     offset = 0
     while True:
-        resp = sb.table("targets").select("id, name").eq("target_type", "COMPANY").range(offset, offset + 999).execute()
+        resp = (sb.table("targets").select("id, name")
+                .eq("target_type", "COMPANY")
+                .range(offset, offset + 999).execute())
         batch = resp.data or []
         rows.extend(batch)
         if len(batch) < 1000:
@@ -49,15 +55,13 @@ def fetch_companies(sb):
     return rows
 
 
-def resolve_parent_id(company_name: str, companies: list) -> int | None:
-    """Match AI-returned company name to a DB company (exact → normalized)."""
+def resolve_parent_id(company_name: str, companies: list):
+    """Match AI-returned company name to DB company (exact → normalized). Returns id or None."""
     if not company_name or company_name.upper() in ("NONE", "UNKNOWN", ""):
         return None
-    # Exact match first
     for c in companies:
         if c["name"].strip().lower() == company_name.strip().lower():
             return c["id"]
-    # Normalized match
     norm = normalize_target_name(company_name)
     for c in companies:
         if normalize_target_name(c["name"]) == norm:
@@ -65,26 +69,60 @@ def resolve_parent_id(company_name: str, companies: list) -> int | None:
     return None
 
 
+def insert_company(sb, company_name: str, companies: list):
+    """
+    Insert a new COMPANY target. Resolves domain + logo via AI.
+    Appends to companies list so subsequent products in the same run can match it.
+    Returns the new company id.
+    """
+    log.info("    🌐 Resolving domain for '%s'...", company_name)
+    domain = resolve_domain(company_name, target_type="company", use_ai=True)
+    row = {
+        "name": company_name,
+        "target_type": "COMPANY",
+        "status": "tracking",
+    }
+    if domain:
+        row["domain"] = domain
+        row["logo_url"] = f"https://logo.clearbit.com/{domain}"
+        log.info("    🔗 Domain: %s", domain)
+
+    result = sb.table("targets").insert(row).execute()
+    inserted = (result.data or [{}])[0]
+    new_id = inserted.get("id")
+    if new_id:
+        companies.append({"id": new_id, "name": company_name})
+        log.info("    💾 Created company: %s (id=%d)", company_name, new_id)
+    return new_id
+
+
 def ai_identify_parents(products: list, company_names: list) -> dict:
     """
-    Send a batch of product names to OpenAI.
-    Returns {product_id: parent_company_name_or_NONE}.
+    Ask OpenAI to identify parent company for each product.
+    Returns {product_id: {"company": name, "known": bool}}
+    - known=True  → company name is in our DB list
+    - known=False → company exists but not in our DB yet (should be created)
+    - company="NONE" → truly unknown or standalone product
     """
     model = get_json_model()
     product_list = "\n".join(f'- {p["id"]}: {p["name"]}' for p in products)
-    company_list = ", ".join(company_names[:200])  # cap to avoid huge prompts
+    company_list = ", ".join(company_names[:300])
 
     prompt = f"""You are a tech industry analyst. For each product below, identify its parent company.
-Only use company names from the provided list. If the parent company is not in the list or unknown, return "NONE".
 
-Known companies:
+Known companies (already in our database):
 {company_list}
 
 Products (format: id: name):
 {product_list}
 
-Return JSON only — an object mapping each product id (as string) to the parent company name or "NONE".
-Example: {{"123": "Apple", "456": "NONE", "789": "Google"}}"""
+For each product return:
+- "company": the parent company name (use exact name from known list if it matches, otherwise the real company name)
+- "known": true if the company is in the known list, false if it exists but is missing from the list, null if truly unknown
+
+Return JSON only — object mapping product id (string) to {{"company": "...", "known": true/false/null}}.
+Use "NONE" for company if the product has no clear parent (e.g. it IS a company, or parent is unknown).
+Example: {{"123": {{"company": "Apple", "known": true}}, "456": {{"company": "Klei Entertainment", "known": false}}, "789": {{"company": "NONE", "known": null}}}}"""
 
     response = model.generate_content(prompt)
     try:
@@ -96,54 +134,76 @@ Example: {{"123": "Apple", "456": "NONE", "789": "Google"}}"""
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--apply", action="store_true", help="Write parent_target_id to DB (default: dry run)")
+    parser.add_argument("--apply", action="store_true", help="Write to DB (default: dry run)")
     args = parser.parse_args()
 
     sb = get_supabase()
-
     products = fetch_unlinked_products(sb)
-    companies = fetch_companies(sb)
+    companies = fetch_companies(sb)  # mutable — new companies appended during run
     company_names = [c["name"] for c in companies]
 
-    log.info("Unlinked products: %d | Known companies: %d", len(products), len(companies))
+    log.info("Unlinked products: %d | Known companies: %d\n", len(products), len(companies))
     if not products:
         log.info("No unlinked products found.")
         return
 
-    # Process in batches
-    linked = []
-    skipped = []
+    to_link = []      # (product, company_name, parent_id)
+    to_create = []    # (product, company_name) — company needs inserting first
+    standalone = []   # products with no known parent
 
     for i in range(0, len(products), BATCH_SIZE):
         batch = products[i:i + BATCH_SIZE]
-        log.info("Processing batch %d/%d...", i // BATCH_SIZE + 1, (len(products) + BATCH_SIZE - 1) // BATCH_SIZE)
+        log.info("Batch %d/%d...", i // BATCH_SIZE + 1, (len(products) + BATCH_SIZE - 1) // BATCH_SIZE)
 
         result = ai_identify_parents(batch, company_names)
 
         for product in batch:
             pid = str(product["id"])
-            company_name = result.get(pid, "NONE")
+            entry = result.get(pid, {})
+            if isinstance(entry, str):
+                # Fallback: old format
+                entry = {"company": entry, "known": entry.upper() not in ("NONE", "UNKNOWN")}
+
+            company_name = entry.get("company", "NONE") if isinstance(entry, dict) else "NONE"
+            known = entry.get("known") if isinstance(entry, dict) else None
+
+            if not company_name or company_name.upper() in ("NONE", "UNKNOWN"):
+                standalone.append(product)
+                continue
+
             parent_id = resolve_parent_id(company_name, companies)
-
             if parent_id:
-                linked.append((product, company_name, parent_id))
+                to_link.append((product, company_name, parent_id))
                 log.info("  ✓ %s → %s (id=%d)", product["name"], company_name, parent_id)
+            elif known is False:
+                to_create.append((product, company_name))
+                log.info("  + %s → '%s' (will create)", product["name"], company_name)
             else:
-                skipped.append(product)
-                if company_name.upper() not in ("NONE", "UNKNOWN", ""):
-                    log.info("  ~ %s → '%s' (not found in DB)", product["name"], company_name)
+                standalone.append(product)
+                log.info("  - %s → '%s' (no match, skipping)", product["name"], company_name)
 
-    log.info("\nSummary: %d to link, %d no match found", len(linked), len(skipped))
+    log.info("\nSummary: %d link, %d create+link, %d standalone/unknown",
+             len(to_link), len(to_create), len(standalone))
 
     if not args.apply:
         log.info("\nDry run — pass --apply to write to DB.")
         return
 
-    for product, company_name, parent_id in linked:
+    # Create missing companies + link
+    for product, company_name in to_create:
+        existing_id = resolve_parent_id(company_name, companies)
+        if not existing_id:
+            existing_id = insert_company(sb, company_name, companies)
+        if existing_id:
+            sb.table("targets").update({"parent_target_id": existing_id}).eq("id", product["id"]).execute()
+            log.info("  💾 Linked %s → %s (new)", product["name"], company_name)
+
+    # Link existing matches
+    for product, company_name, parent_id in to_link:
         sb.table("targets").update({"parent_target_id": parent_id}).eq("id", product["id"]).execute()
         log.info("  💾 Linked %s → %s", product["name"], company_name)
 
-    log.info("\nDone. %d products linked.", len(linked))
+    log.info("\nDone. %d linked, %d new companies created.", len(to_link) + len(to_create), len(to_create))
 
 
 if __name__ == "__main__":

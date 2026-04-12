@@ -23,7 +23,7 @@ REDDIT_SEARCH_LIMIT = 3
 GOOGLE_NEWS_LIMIT = 3
 LOOKBACK_DAYS = 1
 MAX_PAYLOAD_CHARS_PER_FIELD = 2000  # truncate long pros/cons in report payload to avoid token limits
-MAX_CHATTER_CHARS = 3000            # truncate combined chatter before sending to AI (token savings)
+MAX_CHATTER_CHARS = 5000            # truncate combined chatter before sending to AI (6 sources now)
 EVENT_MAX_AGE_DAYS = 14             # skip events older than this in the tracker (avoids dead HTTP calls)
 REPORT_EVENT_MAX_AGE_DAYS = 3      # only include events created within this many days in the daily report
 

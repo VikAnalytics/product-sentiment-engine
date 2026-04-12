@@ -166,18 +166,83 @@ def search_google_news_financial(query: str) -> str:
         return ""
 
 
-def _build_source_type(hn: bool, reddit: bool, news: bool) -> str:
+def search_stocktwits(ticker: str) -> str:
+    """Fetch latest StockTwits messages for a ticker. No auth required for public streams."""
+    if not ticker:
+        return ""
+    url = f"https://api.stocktwits.com/api/2/streams/symbol/{ticker}.json"
+    try:
+        response = requests.get(url, timeout=HTTP_TIMEOUT_SEC)
+        if response.status_code != 200:
+            logger.warning("StockTwits returned %s for ticker=%r", response.status_code, ticker)
+            return ""
+        messages = response.json().get("messages", [])[:5]
+        parts = []
+        for m in messages:
+            body = (m.get("body") or "").strip()[:200]
+            sentiment = m.get("entities", {}).get("sentiment", {})
+            label = sentiment.get("basic", "") if sentiment else ""
+            parts.append(f"{body} [{label}]" if label else body)
+        return " ".join(parts) if parts else ""
+    except Exception as e:
+        logger.warning("StockTwits request failed for %s: %s", ticker, e)
+        return ""
+
+
+def search_yahoo_finance_ticker(ticker: str) -> str:
+    """Fetch Yahoo Finance news RSS for a specific ticker."""
+    if not ticker:
+        return ""
+    import feedparser
+    url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US"
+    try:
+        feed = feedparser.parse(url)
+        entries = (getattr(feed, "entries", None) or [])[:5]
+        parts = []
+        for entry in entries:
+            title = (getattr(entry, "title", "") or "").strip()
+            summary = (getattr(entry, "summary", "") or "")[:200].replace("\n", " ").strip()
+            link = (getattr(entry, "link", "") or "").strip()
+            parts.append(f"{title} - {summary} [URL: {link}]")
+        return " ".join(parts) if parts else ""
+    except Exception as e:
+        logger.warning("Yahoo Finance RSS failed for %s: %s", ticker, e)
+        return ""
+
+
+def search_google_news_general(query: str) -> str:
+    """Fetch Google News RSS for broad stock-moving events (M&A, regulatory, analyst actions)."""
+    import feedparser
+    broad_query = requests.utils.quote(
+        f"{query} stock OR shares OR analyst OR merger OR acquisition OR FDA OR antitrust OR lawsuit OR recall OR tariff"
+    )
+    url = f"https://news.google.com/rss/search?q={broad_query}&hl=en-US&gl=US&ceid=US:en"
+    try:
+        feed = feedparser.parse(url)
+        entries = (getattr(feed, "entries", None) or [])[:GOOGLE_NEWS_LIMIT]
+        parts = []
+        for entry in entries:
+            title = (getattr(entry, "title", "") or "").strip()
+            summary = (getattr(entry, "summary", "") or "")[:200].replace("\n", " ").strip()
+            link = (getattr(entry, "link", "") or "").strip()
+            parts.append(f"{title} - {summary} [URL: {link}]")
+        return " ".join(parts) if parts else ""
+    except Exception as e:
+        logger.warning("Google News general failed for %s: %s", query, e)
+        return ""
+
+
+def _build_source_type(hn: bool, reddit: bool, news: bool, stocktwits: bool = False,
+                       yahoo: bool = False, gnews_general: bool = False) -> str:
     """Build a pipe-separated source type string from which sources had data."""
     active = []
-    if hn:
-        active.append("hn")
-    if reddit:
-        active.append("reddit")
-    if news:
-        active.append("google_news")
-    if not active:
-        return "unknown"
-    return "|".join(active)
+    if hn:            active.append("hn")
+    if reddit:        active.append("reddit")
+    if news:          active.append("google_news")
+    if stocktwits:    active.append("stocktwits")
+    if yahoo:         active.append("yahoo_finance")
+    if gnews_general: active.append("gnews_general")
+    return "|".join(active) if active else "unknown"
 
 
 def get_embedding(text: str) -> list:
@@ -300,6 +365,7 @@ def run_tracker() -> None:
     for t in targets:
         name = t.get("name")
         t_id = t.get("id")
+        ticker = (t.get("ticker") or "").strip()
         target_type = (t.get("target_type") or "").strip()
         if name is None or t_id is None:
             logger.warning("Skipping target with missing name or id: %s", t)
@@ -347,14 +413,20 @@ def run_tracker() -> None:
             search_query = _search_query_from_context(name, target_type, headline)
             logger.info("📡 %s | %s | query=%r", name, headline[:80], search_query)
 
-            # A: fetch all three sources concurrently
-            with ThreadPoolExecutor(max_workers=3) as pool:
-                fut_hn = pool.submit(search_hacker_news, search_query)
-                fut_reddit = pool.submit(search_reddit, search_query)
-                fut_news = pool.submit(search_google_news_financial, name)
-                hn_data = fut_hn.result()
-                reddit_data = fut_reddit.result()
-                news_data = fut_news.result()
+            # A: fetch all sources concurrently (6 workers: 3 existing + 3 new)
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                fut_hn          = pool.submit(search_hacker_news, search_query)
+                fut_reddit      = pool.submit(search_reddit, search_query)
+                fut_news_fin    = pool.submit(search_google_news_financial, name)
+                fut_news_gen    = pool.submit(search_google_news_general, name)
+                fut_stocktwits  = pool.submit(search_stocktwits, ticker)
+                fut_yahoo       = pool.submit(search_yahoo_finance_ticker, ticker)
+                hn_data         = fut_hn.result()
+                reddit_data     = fut_reddit.result()
+                news_data       = fut_news_fin.result()
+                gnews_data      = fut_news_gen.result()
+                stocktwits_data = fut_stocktwits.result()
+                yahoo_data      = fut_yahoo.result()
 
             combined_chatter = ""
             if hn_data:
@@ -362,13 +434,22 @@ def run_tracker() -> None:
             if reddit_data:
                 combined_chatter += f"[SOURCE: Reddit] {reddit_data} "
             if news_data:
-                combined_chatter += f"[SOURCE: Google News Financial] {news_data}"
+                combined_chatter += f"[SOURCE: Google News Financial] {news_data} "
+            if gnews_data:
+                combined_chatter += f"[SOURCE: Google News General] {gnews_data} "
+            if stocktwits_data:
+                combined_chatter += f"[SOURCE: StockTwits] {stocktwits_data} "
+            if yahoo_data:
+                combined_chatter += f"[SOURCE: Yahoo Finance] {yahoo_data}"
 
             # C: truncate chatter before sending to AI
             if len(combined_chatter) > MAX_CHATTER_CHARS:
                 combined_chatter = combined_chatter[:MAX_CHATTER_CHARS]
 
-            source_type = _build_source_type(bool(hn_data), bool(reddit_data), bool(news_data))
+            source_type = _build_source_type(
+                bool(hn_data), bool(reddit_data), bool(news_data),
+                bool(stocktwits_data), bool(yahoo_data), bool(gnews_data),
+            )
 
             if not combined_chatter.strip():
                 logger.info(

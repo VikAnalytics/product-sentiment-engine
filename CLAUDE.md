@@ -209,6 +209,22 @@ REPORT_EVENT_MAX_AGE_DAYS = 3  # Only include events created within last 3 days 
 - **Reddit source**: Switched from `api.reddit.com` JSON (blocked 403 since 2023) to `www.reddit.com/search.rss` via feedparser — no auth required
 - **Stack Overflow removed**: Was returning 429 consistently; removed entirely
 
+## Expanded News Coverage (implemented)
+
+**`scout.py` RSS feeds** (21 total): TechCrunch, The Verge, Wired, Engadget, ZDNet, Reuters Business, Reuters Financial, Yahoo Finance, MarketWatch (x2), CNBC (x2), Benzinga, NYT Business, AP Business, Fortune, SEC EDGAR 8-K atom feed, FTC press releases, FDA news releases.
+
+**`scout.py` CORE_LEMMAS** expanded with M&A (`takeover`, `buyout`, `ipo`, `divest`), regulatory (`approve`, `antitrust`, `sanction`, `recall`), macro (`tariff`, `inflation`, `rate`, `recession`), management (`ceo`, `appoint`, `succession`).
+
+**`tracker.py` sources** (6 per event, concurrent):
+1. Hacker News — Algolia API
+2. Reddit — `reddit.com/search.rss`
+3. Google News Financial — earnings/revenue query
+4. Google News General — broad stock-moving query (M&A, regulatory, analyst, lawsuit, tariff)
+5. StockTwits — public stream per ticker (public companies only)
+6. Yahoo Finance — per-ticker RSS (public companies only)
+
+`MAX_CHATTER_CHARS` = 5000 (was 3000).
+
 ---
 
 ## Sentiment Scoring & Momentum (P1 — implemented)

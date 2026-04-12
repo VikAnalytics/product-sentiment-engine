@@ -34,26 +34,54 @@ def _get_nlp():
 
 # The NLP "Lemmas" (Root Concepts)
 CORE_LEMMAS = {
+    # Product / company events
     "launch", "announce", "release", "unveil", "beta", "debut",
     "acquire", "merge", "buy", "sell", "earn", "revenue", "profit",
     "layoff", "fire", "resign", "hire", "depart",
     "sue", "settle", "fine", "probe", "ban", "block",
     "partner", "collaborate", "expand", "halt", "delay",
-    # Financial / earnings signals
+    # Earnings / analyst signals
     "beat", "miss", "guidance", "forecast", "outlook", "quarter",
     "quarterly", "downgrade", "upgrade", "cut", "raise", "lower",
+    # M&A / corporate actions
+    "takeover", "buyout", "spin", "spinoff", "ipo", "delist", "privatize",
+    "tender", "offer", "stake", "divest", "restructure", "bankruptcy",
+    # Regulatory / legal
+    "approve", "reject", "appeal", "ruling", "verdict", "penalty",
+    "recall", "investigate", "subpoena", "antitrust", "sanction",
+    "regulate", "compliance", "violation", "enforcement",
+    # Macro / market signals
+    "tariff", "inflation", "rate", "interest", "recession", "gdp",
+    "supply", "shortage", "demand", "inventory", "margin",
+    # Management / strategy
+    "ceo", "cfo", "cto", "chairman", "appoint", "replace", "succession",
+    "strategy", "pivot", "restructure", "reorganize",
 }
 
 RSS_FEEDS = [
-    # Tech news (event discovery)
+    # Tech news
     "https://techcrunch.com/feed/",
     "https://www.theverge.com/rss/index.xml",
     "https://www.wired.com/feed/rss",
     "https://www.engadget.com/rss.xml",
     "https://www.zdnet.com/news/rss.xml",
-    # Financial / earnings news (P7: source diversity)
+    # Financial / market news
     "https://feeds.reuters.com/reuters/businessNews",
+    "https://feeds.reuters.com/reuters/financialsNews",
     "https://finance.yahoo.com/news/rssindex",
+    "https://feeds.marketwatch.com/marketwatch/topstories/",
+    "https://feeds.marketwatch.com/marketwatch/marketpulse/",
+    "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+    "https://www.cnbc.com/id/10000664/device/rss/rss.html",
+    # Analyst / investing commentary
+    "https://feeds.benzinga.com/benzinga",
+    "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml",
+    "https://apnews.com/hub/business?format=rss",
+    "https://fortune.com/feed/",
+    # Regulatory / government
+    "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&dateb=&owner=include&count=20&output=atom",
+    "https://www.ftc.gov/feeds/press-release.xml",
+    "https://www.fda.gov/about-fda/contact-fda/stay-informed/rss-feeds/fda-news-releases/rss.xml",
 ]
 
 

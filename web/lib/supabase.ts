@@ -144,7 +144,7 @@ export async function fetchRecentHeadlines(lookbackHours = 48): Promise<(Event &
   const since = new Date(Date.now() - lookbackHours * 3600 * 1000).toISOString()
   const { data: events, error } = await supabase
     .from('events')
-    .select('*, targets!inner(*, parent_target:targets!parent_target_id(id, name, logo_url, domain))')
+    .select('*, targets!inner(*)')
     .gte('created_at', since)
     .order('created_at', { ascending: false })
     .limit(200)
@@ -152,6 +152,19 @@ export async function fetchRecentHeadlines(lookbackHours = 48): Promise<(Event &
 
   const eventIds = (events ?? []).map((e: any) => e.id)
   if (eventIds.length === 0) return []
+
+  // Fetch parent companies for product targets
+  const parentIds = [...new Set(
+    (events ?? []).map((e: any) => e.targets?.parent_target_id).filter(Boolean)
+  )] as number[]
+  const parentMap: Record<number, Pick<Target, 'id' | 'name' | 'logo_url' | 'domain'>> = {}
+  if (parentIds.length > 0) {
+    const { data: parents } = await supabase
+      .from('targets')
+      .select('id, name, logo_url, domain')
+      .in('id', parentIds)
+    for (const p of parents ?? []) parentMap[p.id] = p
+  }
 
   const { data: sentRows } = await supabase
     .from('sentiment')
@@ -178,7 +191,9 @@ export async function fetchRecentHeadlines(lookbackHours = 48): Promise<(Event &
     const tags = tagMap[e.id] ?? []
     const topScore = scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : null
     const topTag = tags.length ? tags.sort((a, b) => (TAG_PRIORITY[b] ?? 0) - (TAG_PRIORITY[a] ?? 0))[0] : null
-    return { ...e, target: e.targets, topScore: topScore ? Math.round(topScore) : null, topTag }
+    const target = e.targets
+    const parent_target = target?.parent_target_id ? (parentMap[target.parent_target_id] ?? null) : null
+    return { ...e, target: { ...target, parent_target }, topScore: topScore ? Math.round(topScore) : null, topTag }
   })
 }
 

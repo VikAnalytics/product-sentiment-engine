@@ -1,9 +1,10 @@
 import { createClient } from '@supabase/supabase-js'
 
-const url = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+const url = process.env.NEXT_PUBLIC_SUPABASE_URL ?? ''
+const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? ''
 
-export const supabase = createClient(url, key)
+// createClient throws if url is empty — guard for build-time SSR prerender
+export const supabase = url && key ? createClient(url, key) : createClient('https://placeholder.supabase.co', 'placeholder')
 
 // ── Types ────────────────────────────────────────────────────────────────────
 

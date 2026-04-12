@@ -140,11 +140,11 @@ export async function fetchTargets(): Promise<Target[]> {
   return data ?? []
 }
 
-export async function fetchRecentHeadlines(lookbackHours = 48): Promise<(Event & { target: Target; topScore: number | null; topTag: string | null })[]> {
+export async function fetchRecentHeadlines(lookbackHours = 48): Promise<(Event & { target: Target & { parent_target: Pick<Target, 'id' | 'name' | 'logo_url' | 'domain'> | null }; topScore: number | null; topTag: string | null })[]> {
   const since = new Date(Date.now() - lookbackHours * 3600 * 1000).toISOString()
   const { data: events, error } = await supabase
     .from('events')
-    .select('*, targets!inner(*)')
+    .select('*, targets!inner(*, parent_target:targets!parent_target_id(id, name, logo_url, domain))')
     .gte('created_at', since)
     .order('created_at', { ascending: false })
     .limit(200)

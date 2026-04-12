@@ -104,11 +104,20 @@ export default function NewsFeed({ sectorFilter }: Props) {
                     opacity: 0.6,
                   }} />
                   <div style={{ flex: 1, padding: '14px 18px' }}>
+                    {/* parent company row — shown for products */}
+                    {item.target?.target_type === 'PRODUCT' && item.target?.parent_target && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
+                        <Logo logoUrl={item.target.parent_target.logo_url} domain={item.target.parent_target.domain} name={item.target.parent_target.name} size={14} radius="sm" />
+                        <span style={{ fontFamily: 'var(--ff-m)', fontSize: 10, fontWeight: 700, letterSpacing: '0.14em', textTransform: 'uppercase', color: 'var(--gold)' }}>
+                          {item.target.parent_target.name}
+                        </span>
+                      </div>
+                    )}
                     <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 6, flexWrap: 'wrap' }}>
-                      {item.target && (
+                      {item.target?.target_type !== 'PRODUCT' && item.target && (
                         <Logo logoUrl={item.target.logo_url} domain={item.target.domain} name={item.target.name} size={18} radius="sm" />
                       )}
-                      <span style={{ fontFamily: 'var(--ff-m)', fontSize: 11, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--t1)' }}>
+                      <span style={{ fontFamily: 'var(--ff-m)', fontSize: 11, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: item.target?.target_type === 'PRODUCT' ? 'var(--t2)' : 'var(--t1)' }}>
                         {item.target?.name ?? '—'}
                       </span>
                       {item.target?.sector && (

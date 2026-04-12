@@ -101,7 +101,24 @@ def passes_filter(text: str, nlp=None, lemmas=None):
     return False
 
 
-def save_target_to_db(target_type: str, name: str, description: str) -> None:
+def _resolve_parent_id(supabase, parent_company_name: str) -> Optional[int]:
+    """Look up a company target by name and return its id, or None if not found."""
+    if not parent_company_name or parent_company_name.upper() == "NONE":
+        return None
+    resp = supabase.table("targets").select("id").eq("target_type", "COMPANY").eq("name", parent_company_name).limit(1).execute()
+    rows = getattr(resp, "data", None) or []
+    if rows:
+        return rows[0].get("id")
+    # Fuzzy fallback: normalized name match
+    all_companies = supabase.table("targets").select("id, name").eq("target_type", "COMPANY").execute()
+    norm_parent = normalize_target_name(parent_company_name)
+    for c in (getattr(all_companies, "data", None) or []):
+        if normalize_target_name(c.get("name") or "") == norm_parent:
+            return c.get("id")
+    return None
+
+
+def save_target_to_db(target_type: str, name: str, description: str, parent_company_name: str = "") -> None:
     """Saves the extracted company or product to Supabase."""
     target_type = target_type.strip().upper()
     name = name.strip()
@@ -117,6 +134,12 @@ def save_target_to_db(target_type: str, name: str, description: str) -> None:
         if data_list and len(data_list) > 0:
             # Exact name match: add event to existing target
             target_id = data_list[0].get("id")
+            # Also backfill parent_target_id if not yet set
+            if target_type == "PRODUCT" and parent_company_name and not data_list[0].get("parent_target_id"):
+                parent_id = _resolve_parent_id(supabase, parent_company_name)
+                if parent_id:
+                    supabase.table("targets").update({"parent_target_id": parent_id}).eq("id", target_id).execute()
+                    logger.info("   🔗 Linked %s → %s", name, parent_company_name)
             if not target_id or not new_headline:
                 logger.info("   -> [%s] %s is already in the database. Skipping.", target_type, name)
                 return
@@ -152,11 +175,16 @@ def save_target_to_db(target_type: str, name: str, description: str) -> None:
             "description": new_headline,
             "status": "tracking",
         }
-        if (target_type or "").strip().upper() == "COMPANY":
+        if target_type == "COMPANY":
             domain = resolve_domain(name, target_type="company", use_ai=True)
             if domain:
                 row["domain"] = domain
                 row["logo_url"] = f"https://logo.clearbit.com/{domain}"
+        if target_type == "PRODUCT" and parent_company_name:
+            parent_id = _resolve_parent_id(supabase, parent_company_name)
+            if parent_id:
+                row["parent_target_id"] = parent_id
+                logger.info("   🔗 Linking %s → %s (id=%d)", name, parent_company_name, parent_id)
         insert_result = supabase.table("targets").insert(row).execute()
         inserted = getattr(insert_result, "data", None)
         target_id = inserted[0].get("id") if inserted and len(inserted) > 0 else None
@@ -168,15 +196,17 @@ def save_target_to_db(target_type: str, name: str, description: str) -> None:
         logger.error("   ❌ Database Error for %s: %s", name, e)
 
 
-def _parse_ai_extraction_line(line: str) -> Optional[Tuple[str, str, str]]:
+def _parse_ai_extraction_line(line: str) -> Optional[Tuple[str, str, str, str]]:
     """
-    Parse a single line of AI output: TYPE | Name | Description (description may contain |).
-    Returns (target_type, name, description) or None if invalid.
+    Parse a single line of AI output.
+    COMPANY: TYPE | Name | Description
+    PRODUCT: TYPE | Name | Description | Parent Company (or NONE)
+    Returns (target_type, name, description, parent_company) or None if invalid.
     """
     line = line.strip()
     if "|" not in line:
         return None
-    parts = line.split("|", 2)  # max 3 parts: type, name, rest is description
+    parts = line.split("|", 3)  # max 4 parts
     if len(parts) < 3:
         return None
     target_type = parts[0].strip().upper()
@@ -184,9 +214,10 @@ def _parse_ai_extraction_line(line: str) -> Optional[Tuple[str, str, str]]:
         return None
     name = parts[1].strip()
     description = parts[2].strip()
+    parent_company = parts[3].strip() if len(parts) > 3 else ""
     if not name:
         return None
-    return (target_type, name, description)
+    return (target_type, name, description, parent_company)
 
 
 def run_scout() -> None:
@@ -225,8 +256,10 @@ def run_scout() -> None:
     1. A single article might mention multiple companies and products. Extract all of them.
     2. Format your response exactly like this, with one entity per line:
     COMPANY | [Company Name] | [1-sentence summary of event]
-    PRODUCT | [Product Name] | [1-sentence summary of launch]
+    PRODUCT | [Product Name] | [1-sentence summary of launch] | [Parent Company Name or NONE]
 
+    For PRODUCT lines, always include the parent company name as the 4th field (e.g. Apple for AirPods, Google for Pixel).
+    If the parent company is unknown or not mentioned, write NONE.
     Do not include any other conversational text, headers, or markdown.
     If absolutely nothing is found, output NONE.
 
@@ -244,7 +277,7 @@ def run_scout() -> None:
         for line in raw_text.split("\n"):
             parsed = _parse_ai_extraction_line(line)
             if parsed:
-                save_target_to_db(parsed[0], parsed[1], parsed[2])
+                save_target_to_db(parsed[0], parsed[1], parsed[2], parsed[3])
         logger.info("✅ Scout completed successfully.")
     except Exception as e:
         logger.error("⚠️ AI API Error (You might still be out of quota!): %s", e)

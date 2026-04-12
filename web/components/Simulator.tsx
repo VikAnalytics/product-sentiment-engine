@@ -1,12 +1,13 @@
 'use client'
 
-import { useEffect, useState, useMemo } from 'react'
+import { useEffect, useState, useMemo, useRef } from 'react'
 import { fetchSimData, fetchLatestPricesForTickers, SimPortfolio, SimHolding, SimTrade, SimPending, SimSnapshot } from '@/lib/supabase'
 import { fmtUSD, fmtPct } from '@/lib/utils'
 
 const SIM_START = 1000
 
 export default function Simulator() {
+  const [strategyOpen, setStrategyOpen] = useState(false)
   const [portfolio, setPortfolio] = useState<SimPortfolio | null>(null)
   const [holdings, setHoldings] = useState<SimHolding[]>([])
   const [pending, setPending] = useState<SimPending[]>([])
@@ -112,6 +113,9 @@ export default function Simulator() {
             </div>
           ))}
         </div>
+
+        {/* ── strategy overview ── */}
+        <StrategyOverview open={strategyOpen} onToggle={() => setStrategyOpen(v => !v)} />
 
         {/* open positions */}
         <div style={{ fontFamily: 'var(--ff-m)', fontSize: 11, letterSpacing: '0.2em', textTransform: 'uppercase', color: 'var(--tm)', marginBottom: 10, paddingBottom: 7, borderBottom: '1px solid var(--br)' }}>
@@ -241,6 +245,212 @@ export default function Simulator() {
           </table>
         )}
       </div>
+    </div>
+  )
+}
+
+// ── Strategy Overview ─────────────────────────────────────────────────────────
+
+const LAYERS = [
+  {
+    num: '01',
+    name: 'Multi-Factor Ranking',
+    gate: 'Top 20% of universe only',
+    color: 'var(--blue)',
+    colorD: 'var(--blue-d)',
+    factors: [
+      { label: 'Sentiment Momentum', weight: '30%', desc: 'Avg score this week vs. prior week' },
+      { label: 'Price Momentum',     weight: '25%', desc: '5-day return from stock_prices' },
+      { label: 'Inv. Volatility',    weight: '15%', desc: 'Lower vol = higher score' },
+      { label: 'Signal Consistency', weight: '15%', desc: 'Fraction of positive-score sentiment rows' },
+      { label: 'Historical Accuracy',weight: '15%', desc: 'Past win rate from price_reactions' },
+    ],
+    note: 'All 5 factors are Z-scored and weighted. Only the top quintile advances.',
+  },
+  {
+    num: '02',
+    name: 'Expected Value Gate',
+    gate: 'p_win > 55% AND EV > 3%',
+    color: 'var(--gold)',
+    colorD: 'var(--gold-d)',
+    factors: [
+      { label: 'p_win',       weight: '>55%', desc: 'Historical win rate from price_reactions (min 5 samples)' },
+      { label: 'Avg Gain',    weight: '',     desc: 'Mean positive return when sentiment was bullish' },
+      { label: 'Avg Loss',    weight: '',     desc: 'Mean negative return when sentiment was bearish' },
+      { label: 'EV',          weight: '>3%',  desc: 'p_win × avg_gain + (1−p_win) × avg_loss' },
+    ],
+    note: 'No historical data (<5 samples) = automatic disqualification. Cash is preserved over uncertainty.',
+  },
+  {
+    num: '03',
+    name: 'Signal Consensus',
+    gate: '4 of 5 factors must be positive',
+    color: '#7AB848',
+    colorD: 'rgba(122,184,72,0.10)',
+    factors: [
+      { label: 'Sentiment Momentum', weight: '', desc: 'Positive = bullish signal' },
+      { label: 'Price Momentum',     weight: '', desc: 'Positive = uptrend' },
+      { label: 'Inv. Volatility',    weight: '', desc: 'Above median = low-risk signal' },
+      { label: 'Signal Consistency', weight: '', desc: '>50% positive rows this week' },
+      { label: 'Historical Accuracy',weight: '', desc: 'Win rate above universe median' },
+    ],
+    note: 'Mixed signals = no trade. Requires 4/5 directional agreement before capital is committed.',
+  },
+  {
+    num: '04',
+    name: 'Regime Filter',
+    gate: '≥50% of universe has positive sentiment momentum',
+    color: 'var(--amber)',
+    colorD: 'var(--amber-d)',
+    factors: [
+      { label: 'Universe Sentiment', weight: '', desc: 'Count targets with positive 7-day momentum' },
+      { label: 'Risk-On Threshold',  weight: '≥50%', desc: 'If market is broadly negative, hold cash' },
+    ],
+    note: 'Macro risk-off override. When the majority of tracked companies are deteriorating, no new positions are opened regardless of individual signals.',
+  },
+  {
+    num: '05',
+    name: 'Markowitz + Kelly Sizing',
+    gate: 'Max 5 positions · Max 25% per position · Max 80% cash deployed',
+    color: 'var(--green)',
+    colorD: 'var(--green-d)',
+    factors: [
+      { label: 'Max-Sharpe Weights', weight: '', desc: 'scipy SLSQP optimizer, Ledoit-Wolf covariance shrinkage' },
+      { label: 'Kelly Criterion',    weight: '≤25%', desc: 'f* = (p×b − (1−p)) / b, capped at 25% per position' },
+      { label: 'Final Weight',       weight: '', desc: 'min(Markowitz, Kelly, 30%) per position' },
+      { label: 'Deploy Cap',         weight: '80%', desc: 'At most 80% of cash is ever deployed in one cycle' },
+    ],
+    note: 'Position sizes come from math, not AI opinion. AI only writes the rationale text after the quant decision is made.',
+  },
+]
+
+const RISK_RULES = [
+  { trigger: '−8% from avg cost',         action: 'Stop-loss → forced SELL' },
+  { trigger: '+25% from avg cost',         action: 'Take-profit → forced SELL' },
+  { trigger: 'implication_tag = threat',   action: 'Sentiment stop → forced SELL' },
+  { trigger: 'Avg score < −3 today',       action: 'Sentiment stop → forced SELL' },
+  { trigger: '−15% from portfolio peak',   action: 'Max drawdown → liquidate ALL + clear queue' },
+]
+
+function StrategyOverview({ open, onToggle }: { open: boolean; onToggle: () => void }) {
+  return (
+    <div style={{ marginBottom: 22, border: '1px solid var(--br)', borderRadius: 2, overflow: 'hidden' }}>
+      {/* toggle header */}
+      <button
+        onClick={onToggle}
+        style={{
+          width: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '12px 16px',
+          background: open ? 'var(--bg-p)' : 'var(--bg-r)',
+          border: 'none',
+          cursor: 'pointer',
+          transition: 'background 0.15s',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <span style={{ fontFamily: 'var(--ff-m)', fontSize: 11, letterSpacing: '0.2em', textTransform: 'uppercase', color: 'var(--gold)' }}>
+            Strategy Overview
+          </span>
+          <span style={{ fontFamily: 'var(--ff-b)', fontSize: 13, color: 'var(--tm)', fontStyle: 'italic' }}>
+            Five-layer quant pipeline — how stocks are selected daily
+          </span>
+        </div>
+        <span style={{ fontFamily: 'var(--ff-m)', fontSize: 13, color: 'var(--tm)', transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }}>▾</span>
+      </button>
+
+      {open && (
+        <div style={{ padding: '0 16px 20px', background: 'var(--bg-p)' }}>
+
+          {/* pipeline flow */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 0, margin: '18px 0 20px', overflowX: 'auto', paddingBottom: 4 }}>
+            {LAYERS.map((l, i) => (
+              <div key={l.num} style={{ display: 'flex', alignItems: 'center', flexShrink: 0 }}>
+                <div style={{
+                  background: 'var(--bg-h)',
+                  border: `1px solid ${l.color}`,
+                  borderRadius: 2,
+                  padding: '6px 12px',
+                  textAlign: 'center',
+                  minWidth: 110,
+                }}>
+                  <div style={{ fontFamily: 'var(--ff-m)', fontSize: 9, color: l.color, letterSpacing: '0.15em', marginBottom: 3 }}>{l.num}</div>
+                  <div style={{ fontFamily: 'var(--ff-m)', fontSize: 10, color: 'var(--t1)', letterSpacing: '0.06em', lineHeight: 1.3 }}>{l.name}</div>
+                </div>
+                {i < LAYERS.length - 1 && (
+                  <div style={{ padding: '0 6px', fontFamily: 'var(--ff-m)', fontSize: 14, color: 'var(--tm)' }}>→</div>
+                )}
+              </div>
+            ))}
+            <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0 }}>
+              <div style={{ padding: '0 6px', fontFamily: 'var(--ff-m)', fontSize: 14, color: 'var(--tm)' }}>→</div>
+              <div style={{ background: 'var(--bg-h)', border: '1px solid var(--green)', borderRadius: 2, padding: '6px 12px', textAlign: 'center' }}>
+                <div style={{ fontFamily: 'var(--ff-m)', fontSize: 9, color: 'var(--green)', letterSpacing: '0.15em', marginBottom: 3 }}>EXECUTE</div>
+                <div style={{ fontFamily: 'var(--ff-m)', fontSize: 10, color: 'var(--t1)', letterSpacing: '0.06em' }}>Next Open</div>
+              </div>
+            </div>
+          </div>
+
+          {/* layer detail cards */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {LAYERS.map(l => (
+              <div key={l.num} style={{ background: 'var(--bg-h)', border: `1px solid var(--br)`, borderLeft: `3px solid ${l.color}`, borderRadius: 2, padding: '12px 14px' }}>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 10 }}>
+                  <span style={{ fontFamily: 'var(--ff-m)', fontSize: 10, color: l.color, letterSpacing: '0.15em' }}>LAYER {l.num}</span>
+                  <span style={{ fontFamily: 'var(--ff-d)', fontSize: 18, fontWeight: 400, color: 'var(--t1)' }}>{l.name}</span>
+                  <span style={{ fontFamily: 'var(--ff-m)', fontSize: 10, color: l.color, background: l.colorD, border: `1px solid ${l.color}`, padding: '2px 8px', borderRadius: 1, marginLeft: 'auto', whiteSpace: 'nowrap' }}>
+                    {l.gate}
+                  </span>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 6, marginBottom: 10 }}>
+                  {l.factors.map(f => (
+                    <div key={f.label} style={{ background: 'var(--bg-r)', border: '1px solid var(--br)', borderRadius: 2, padding: '7px 10px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 3 }}>
+                        <span style={{ fontFamily: 'var(--ff-m)', fontSize: 10, color: 'var(--t1)', fontWeight: 700 }}>{f.label}</span>
+                        {f.weight && <span style={{ fontFamily: 'var(--ff-m)', fontSize: 10, color: l.color }}>{f.weight}</span>}
+                      </div>
+                      <span style={{ fontFamily: 'var(--ff-b)', fontSize: 12, color: 'var(--t2)', fontStyle: 'italic' }}>{f.desc}</span>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ fontFamily: 'var(--ff-b)', fontSize: 12.5, color: 'var(--tm)', fontStyle: 'italic', lineHeight: 1.6, borderTop: '1px solid var(--br)', paddingTop: 8 }}>
+                  {l.note}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* risk management */}
+          <div style={{ marginTop: 16, background: 'var(--bg-h)', border: '1px solid var(--br)', borderLeft: '3px solid var(--red)', borderRadius: 2, padding: '12px 14px' }}>
+            <div style={{ fontFamily: 'var(--ff-m)', fontSize: 10, color: 'var(--red)', letterSpacing: '0.15em', marginBottom: 10 }}>RISK MANAGEMENT · Execute step</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {RISK_RULES.map(r => (
+                <div key={r.trigger} style={{ display: 'flex', alignItems: 'baseline', gap: 12 }}>
+                  <span style={{ fontFamily: 'var(--ff-m)', fontSize: 11, color: 'var(--t2)', minWidth: 220, flexShrink: 0 }}>{r.trigger}</span>
+                  <span style={{ fontFamily: 'var(--ff-m)', fontSize: 9, color: 'var(--tm)', letterSpacing: '0.06em' }}>→</span>
+                  <span style={{ fontFamily: 'var(--ff-b)', fontSize: 12.5, color: 'var(--red)', fontStyle: 'italic' }}>{r.action}</span>
+                </div>
+              ))}
+            </div>
+            <div style={{ fontFamily: 'var(--ff-b)', fontSize: 12.5, color: 'var(--tm)', fontStyle: 'italic', lineHeight: 1.6, borderTop: '1px solid var(--br)', paddingTop: 8, marginTop: 10 }}>
+              Risk checks run before any new trades execute. Drawdown liquidation clears the pending queue so no further capital is deployed that day.
+            </div>
+          </div>
+
+          {/* timing note */}
+          <div style={{ marginTop: 12, padding: '10px 14px', background: 'var(--bg-h)', border: '1px solid var(--br)', borderRadius: 2, display: 'flex', gap: 16, alignItems: 'flex-start' }}>
+            <span style={{ fontFamily: 'var(--ff-m)', fontSize: 9, color: 'var(--gold)', letterSpacing: '0.15em', flexShrink: 0, paddingTop: 2 }}>TIMING</span>
+            <span style={{ fontFamily: 'var(--ff-b)', fontSize: 13, color: 'var(--t2)', lineHeight: 1.65 }}>
+              Pipeline runs at <b style={{ color: 'var(--t1)' }}>5 pm EST</b> daily.
+              The <b style={{ color: 'var(--t1)' }}>analyze</b> step reads today's sentiment and queues trades.
+              The <b style={{ color: 'var(--t1)' }}>execute</b> step next morning buys at the <b style={{ color: 'var(--t1)' }}>9:30 am open price</b> already stored in stock_prices — correctly simulating next-day-open execution with no look-ahead bias.
+            </span>
+          </div>
+
+        </div>
+      )}
     </div>
   )
 }

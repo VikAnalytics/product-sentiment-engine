@@ -32,6 +32,14 @@ jobs:
         run: |
           echo "is_monday=$([ $(date +%u) -eq 1 ] && echo 'true' || echo 'false')" >> $GITHUB_OUTPUT
 
+      - name: Check if today is fortnightly snapshot day
+        id: check_fortnight
+        run: |
+          WEEK=$(date +%-V)
+          DOW=$(date +%u)
+          IS_FORTNIGHT=$( [ $((WEEK % 2)) -eq 0 ] && [ $DOW -eq 1 ] && echo 'true' || echo 'false' )
+          echo "is_fortnight=${IS_FORTNIGHT}" >> $GITHUB_OUTPUT
+
       - name: Run Daily Pipeline
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -40,9 +48,11 @@ jobs:
         run: |
           PYTHONPATH=src python src/scout.py
           PYTHONPATH=src python src/sec_scout.py
-          PYTHONPATH=src python src/tracker.py
           PYTHONPATH=src python src/price_fetcher.py
+          PYTHONPATH=src python src/sim_trader.py --action execute
+          PYTHONPATH=src python src/tracker.py
           PYTHONPATH=src python src/price_correlator.py
+          PYTHONPATH=src python src/sim_trader.py --action analyze
           PYTHONPATH=src python src/report.py
 
       - name: Run Weekly Brief (Mondays only)
@@ -53,6 +63,15 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
           PYTHONPATH=src python src/weekly_brief.py
+
+      - name: Run Fortnightly Snapshot (even-week Mondays)
+        if: steps.check_fortnight.outputs.is_fortnight == 'true'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          PYTHONPATH=src python src/sim_trader.py --action snapshot
 
       - name: Save Reports to GitHub
         run: |

@@ -6,8 +6,9 @@ Dual-signal market intelligence platform that:
 1. **Scouts** tech news from RSS feeds + SEC EDGAR filings (8-K, 10-Q, 10-K)
 2. **Tracks** community sentiment from Hacker News + Reddit discussions
 3. **Prices** stock reactions to each event via inter-event window attribution
-4. **Reports** executive-ready market intelligence reports
-5. **Displays** a Streamlit dashboard with sentiment scores + price reaction badges
+4. **Simulates** AI-driven stock trading using a five-layer quant strategy on sentiment + price data
+5. **Reports** executive-ready market intelligence reports
+6. **Displays** a Streamlit dashboard with sentiment scores + price reaction badges + simulator
 
 Target audience: strategy leaders and investment teams who want to know what news moved markets and why.
 
@@ -18,16 +19,21 @@ Target audience: strategy leaders and investment teams who want to know what new
 ```
 RSS Feeds + SEC EDGAR
    ↓
-[scout.py]          → NLP filter → OpenAI extracts targets + events → Supabase (targets, events)
-[sec_scout.py]      → EDGAR submissions API → 8-K/10-Q/10-K filing events → Supabase (events)
+[scout.py]            → NLP filter → OpenAI extracts targets + events → Supabase (targets, events)
+[sec_scout.py]        → EDGAR submissions API → 8-K/10-Q/10-K filing events → Supabase (events)
    ↓
-[tracker.py]        → HN + Reddit fetch → local embeddings → pgvector dedupe → OpenAI sentiment → Supabase (sentiment)
-[price_fetcher.py]  → yfinance 5-min OHLCV bars → Supabase (stock_prices)
+[price_fetcher.py]    → yfinance 5-min OHLCV bars → Supabase (stock_prices)
+[sim_trader.py execute] → settle yesterday's queued trades at today's open price
+   ↓
+[tracker.py]          → HN + Reddit fetch → local embeddings → pgvector dedupe → OpenAI sentiment → Supabase (sentiment)
 [price_correlator.py] → inter-event window attribution → Supabase (price_reactions)
+[sim_trader.py analyze] → 5-layer quant strategy → queue tomorrow's trades → Supabase (sim_pending_trades)
    ↓
-[report.py]         → Aggregate + dedupe → OpenAI report → reports/market_intelligence_YYYY-MM-DD.md
+[report.py]           → Aggregate + dedupe → OpenAI report → reports/market_intelligence_YYYY-MM-DD.md
+[weekly_brief.py]     → 7-day synthesis → reports/weekly_brief_YYYY-WXX.md (Mondays)
+[sim_trader.py snapshot] → fortnightly P&L snapshot → Supabase (sim_snapshots) (even-week Mondays)
    ↓
-[app.py]            → Streamlit dashboard: sentiment + price badges + price chart overlay
+[app.py]              → Streamlit dashboard: sentiment + price badges + price chart + simulator
 ```
 
 ---
@@ -43,7 +49,8 @@ RSS Feeds + SEC EDGAR
 | NLP filtering | spaCy (`en_core_web_sm`) |
 | Data sources | RSS, HN Algolia API, Reddit RSS, Google News RSS, SEC EDGAR |
 | Price data | yfinance (5-min OHLCV, 59-day history, free) |
-| Automation | GitHub Actions + external cron |
+| Quant optimization | numpy + scipy (`SLSQP` solver for Markowitz max-Sharpe) |
+| Automation | GitHub Actions + external cron (cron-job.org, 5pm EST daily) |
 
 ---
 
@@ -63,7 +70,8 @@ RSS Feeds + SEC EDGAR
 | `src/sec_scout.py` | SEC EDGAR filing scout → events (8-K, 10-Q, 10-K, DEF 14A) |
 | `src/price_fetcher.py` | Fetch 5-min OHLCV bars via yfinance → stock_prices table |
 | `src/price_correlator.py` | Inter-event price attribution → price_reactions table |
-| `supabase/migrations/` | Schema evolution (run 000 → 014 in order) |
+| `src/sim_trader.py` | AI stock simulator: execute/analyze/snapshot (five-layer quant strategy) |
+| `supabase/migrations/` | Schema evolution (run 000 → 015 in order) |
 | `.github/workflows/run_engine.yml` | Daily automation |
 
 ---
@@ -76,6 +84,11 @@ RSS Feeds + SEC EDGAR
   - `sentiment_score`: AI-assigned score from -10 (very negative) to +10 (very positive); NULL for rows before migration 008
 - **target_sentiment_summary**: AI-consolidated per-target summary (one row per target)
 - **match_sentiment**: PostgreSQL function for pgvector cosine similarity search
+- **sim_portfolio**: Singleton row tracking cash balance + peak value (for drawdown)
+- **sim_holdings**: One row per open position (`ticker UNIQUE`, `shares`, `avg_buy_price`, `total_cost`)
+- **sim_trades**: Full trade log — every executed or skipped BUY/SELL with rationale
+- **sim_pending_trades**: Trades queued by analyze step, consumed by next day's execute
+- **sim_snapshots**: Fortnightly portfolio value snapshots (P&L vs $1,000 starting capital)
 - **stock_prices**: 5-min OHLCV bars per target (`target_id`, `ts`, `open`, `high`, `low`, `close`, `volume`)
 - **price_reactions**: Inter-event attribution per event (`event_id`, `ticker`, `price_at_event`, `window_return_pct`, `reaction_1d/3d/7d`, `market_session`, `confidence`, `confidence_reason`)
 
@@ -293,13 +306,41 @@ REPORT_EVENT_MAX_AGE_DAYS = 3  # Only include events created within last 3 days 
 
 ## News Feed View (implemented)
 
-- **Sidebar nav**: "News Feed / Analysis" radio toggle at the top of the sidebar (above sector filters)
+- **Sidebar nav**: "News Feed / Analysis / Simulator" radio toggle at the top of the sidebar (above sector filters)
 - **News Feed mode**: full-screen chronological feed of all tracked headlines across all companies
   - Date picker (calendar) — browse any past day, not just today
   - Sector multiselect filter
   - Each card: company name + sector pill + relative time + headline + score badge + implication tag + one-line description from top pro
   - `fetch_todays_headlines(lookback_hours)` in `app.py`, TTL=120s
 - **Analysis mode**: existing Deep Dive / Compare / Rankings / Weekly Brief tabs
+- **Simulator mode**: full-page portfolio view (see below)
+
+## AI Stock Simulator (implemented)
+
+- **Migration**: `015_simulator.sql` — 5 tables: `sim_portfolio`, `sim_holdings`, `sim_trades`, `sim_pending_trades`, `sim_snapshots`
+- **Script**: `src/sim_trader.py` — three actions: `--action execute | analyze | snapshot`
+- **Capital**: $1,000 starting cash, persistent (compounds over time, not reset per round)
+- **Trade execution**: BUY/SELL only at market open price (first 5-min bar from `stock_prices`); trades queued by `analyze`, consumed by next day's `execute`
+- **Timing**: cron fires 5pm EST → `execute` uses today's 9:30am open (already in DB) → correctly simulates "bought at open"
+
+**Five-layer quant strategy (analyze step):**
+1. **Multi-Factor Ranking**: 5 Z-scored factors (sentiment momentum 30%, price momentum 25%, inverse volatility 15%, signal consistency 15%, historical accuracy 15%) → top 20% of universe
+2. **EV Gate**: p_win > 55% AND expected return > 3% from `price_reactions` history (min 5 samples)
+3. **Signal Consensus**: 4/5 factors must be directionally positive
+4. **Regime Filter**: ≥50% of universe must have positive sentiment momentum (risk-off = hold cash)
+5. **Markowitz + Kelly**: `scipy` max-Sharpe optimization with Ledoit-Wolf covariance shrinkage; Kelly Criterion caps each position at 25%; max 80% of cash deployed
+
+**Risk management (execute step):**
+- Stop-loss: −8% from avg cost → forced SELL
+- Take-profit: +25% → forced SELL
+- Sentiment stop: `implication_tag='threat'` or today's avg score < −3 → forced SELL
+- Max drawdown: −15% from `peak_value` → liquidate all + clear pending queue
+
+**Dashboard**: Sidebar "Simulator" view shows portfolio summary (cash / holdings value / total P&L), open positions with unrealized P&L, queued trades for tomorrow, recent trade log, and Altair portfolio growth chart from fortnightly snapshots.
+
+**GitHub Actions**: `execute` added to daily pipeline after `price_fetcher`; `analyze` added after `price_correlator`; `snapshot` runs on even-week Mondays alongside `weekly_brief`
+
+**Dependencies**: `numpy` and `scipy` added to `requirements.txt`
 
 ## Key Implementation Notes
 

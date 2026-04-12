@@ -1086,7 +1086,7 @@ def render_sidebar(targets: list, selected_target_id: Optional[int]) -> tuple:
         st.divider()
 
         # ── Top-level navigation ───────────────────────────────
-        view = st.radio("View", ["News Feed", "Analysis"], horizontal=True,
+        view = st.radio("View", ["News Feed", "Analysis", "Simulator"], horizontal=True,
                         label_visibility="collapsed", key="sidebar_view")
         st.divider()
 
@@ -2174,6 +2174,10 @@ def main():
         render_news_tab(targets)
         return
 
+    if view == "Simulator":
+        render_simulator_tab()
+        return
+
     tab_dive, tab_compare, tab_rank, tab_brief = st.tabs(["Deep Dive", "Compare", "Rankings", "Weekly Brief"])
 
     with tab_dive:
@@ -2280,6 +2284,298 @@ def main():
 
     with tab_brief:
         render_weekly_brief_tab()
+
+
+# ---------------------------------------------------------------------------
+# Simulator tab — fetch helpers
+# ---------------------------------------------------------------------------
+
+@st.cache_data(ttl=120)
+def fetch_sim_portfolio() -> Optional[dict]:
+    """Fetch the singleton sim_portfolio row."""
+    try:
+        resp = get_supabase().table("sim_portfolio").select("cash_usd, updated_at").limit(1).execute()
+        rows = resp.data or []
+        return rows[0] if rows else None
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=120)
+def fetch_sim_holdings() -> list:
+    """Fetch all sim_holdings joined with target name."""
+    try:
+        resp = (
+            get_supabase()
+            .table("sim_holdings")
+            .select("*, targets(name, sector)")
+            .execute()
+        )
+        return resp.data or []
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=120)
+def fetch_sim_latest_prices(tickers: tuple) -> dict:
+    """Fetch latest close price per ticker from stock_prices."""
+    if not tickers:
+        return {}
+    prices = {}
+    for ticker in tickers:
+        try:
+            resp = (
+                get_supabase()
+                .table("stock_prices")
+                .select("close, ts, target_id")
+                .eq("target_id",
+                    get_supabase().table("targets").select("id").eq("ticker", ticker).limit(1).execute().data[0]["id"])
+                .order("ts", desc=True)
+                .limit(1)
+                .execute()
+            )
+            rows = resp.data or []
+            if rows:
+                prices[ticker] = float(rows[0]["close"])
+        except Exception:
+            pass
+    return prices
+
+
+@st.cache_data(ttl=120)
+def fetch_sim_trades(limit: int = 50) -> list:
+    """Fetch most recent executed/skipped sim_trades."""
+    try:
+        resp = (
+            get_supabase()
+            .table("sim_trades")
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return resp.data or []
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=60)
+def fetch_sim_pending() -> list:
+    """Fetch pending trades queued for tomorrow."""
+    try:
+        resp = (
+            get_supabase()
+            .table("sim_pending_trades")
+            .select("*, targets(name)")
+            .execute()
+        )
+        return resp.data or []
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=300)
+def fetch_sim_snapshots(limit: int = 20) -> list:
+    """Fetch fortnightly performance snapshots ordered by date desc."""
+    try:
+        resp = (
+            get_supabase()
+            .table("sim_snapshots")
+            .select("*")
+            .order("snapshot_date", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return resp.data or []
+    except Exception:
+        return []
+
+
+def _sim_pnl_color(val: float) -> str:
+    if val > 0:
+        return "#30D158"
+    if val < 0:
+        return "#FF453A"
+    return "#86868B"
+
+
+def render_simulator_tab() -> None:
+    """Render the AI Stock Simulator tab."""
+    st.markdown(
+        '<div class="section-head">Stock Simulator</div>'
+        '<div class="section-sub">AI-driven virtual portfolio — $1,000 starting capital, daily sentiment signals, trades at market open.</div>',
+        unsafe_allow_html=True,
+    )
+
+    portfolio = fetch_sim_portfolio()
+    if portfolio is None:
+        st.warning("Simulator not initialized. Apply migration `015_simulator.sql` in Supabase first.")
+        return
+
+    cash = float(portfolio["cash_usd"])
+    holdings = fetch_sim_holdings()
+    tickers_tuple = tuple(h["ticker"] for h in holdings)
+
+    # Fetch latest prices for unrealized P&L
+    latest_prices = fetch_sim_latest_prices(tickers_tuple) if tickers_tuple else {}
+
+    total_holdings_value = 0.0
+    holdings_rows = []
+    for h in holdings:
+        ticker = h["ticker"]
+        shares = float(h["shares"])
+        avg_cost = float(h["avg_buy_price"])
+        cost_basis = float(h["total_cost"])
+        cur_price = latest_prices.get(ticker)
+        market_val = round(shares * cur_price, 2) if cur_price else None
+        if market_val:
+            total_holdings_value += market_val
+        unreal_pnl = round(market_val - cost_basis, 2) if market_val else None
+        unreal_pct = round(unreal_pnl / cost_basis * 100, 2) if (unreal_pnl is not None and cost_basis) else None
+        tgt = h.get("targets") or {}
+        holdings_rows.append({
+            "Ticker": ticker,
+            "Company": tgt.get("name", ""),
+            "Sector": tgt.get("sector", ""),
+            "Shares": shares,
+            "Avg Cost": f"${avg_cost:.2f}",
+            "Current Price": f"${cur_price:.2f}" if cur_price else "—",
+            "Mkt Value": f"${market_val:.2f}" if market_val else "—",
+            "Unrealized P&L": f"${unreal_pnl:+.2f}" if unreal_pnl is not None else "—",
+            "P&L %": f"{unreal_pct:+.1f}%" if unreal_pct is not None else "—",
+        })
+
+    total_value = round(cash + total_holdings_value, 2)
+    pnl_usd = round(total_value - 1000.0, 2)
+    pnl_pct = round(pnl_usd / 1000.0 * 100, 2)
+    pnl_color = _sim_pnl_color(pnl_usd)
+
+    # --- Portfolio summary strip ---
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("Cash Available", f"${cash:,.2f}")
+    with c2:
+        st.metric("Holdings Value", f"${total_holdings_value:,.2f}", delta=f"{len(holdings)} position(s)")
+    with c3:
+        st.metric(
+            "Total Portfolio",
+            f"${total_value:,.2f}",
+            delta=f"{pnl_usd:+.2f} ({pnl_pct:+.1f}%) vs $1,000",
+            delta_color="normal",
+        )
+
+    st.markdown("---")
+
+    # --- Open positions ---
+    st.markdown("**Open Positions**")
+    if holdings_rows:
+        df_hold = pd.DataFrame(holdings_rows)
+        st.dataframe(df_hold, use_container_width=True, hide_index=True)
+    else:
+        st.caption("_No open positions. AI will queue buys when strong signals appear._")
+
+    # --- Queued for tomorrow ---
+    pending = fetch_sim_pending()
+    st.markdown("**Queued for Tomorrow's Open**")
+    if pending:
+        for p in pending:
+            tgt = p.get("targets") or {}
+            name = tgt.get("name", p["ticker"])
+            action_color = "#30D158" if p["action"] == "BUY" else "#FF453A"
+            action_label = f'<span style="color:{action_color};font-weight:700;">{p["action"]}</span>'
+            amount_str = f" ${float(p['usd_amount']):.2f}" if p.get("usd_amount") else ""
+            st.markdown(
+                f'{action_label} **{p["ticker"]}** ({name}){amount_str}',
+                unsafe_allow_html=True,
+            )
+            if p.get("ai_rationale"):
+                st.caption(f"↳ {p['ai_rationale'][:120]}")
+    else:
+        st.caption("_No trades queued. Run `sim_trader.py --action analyze` to generate picks._")
+
+    st.markdown("---")
+
+    # --- Trade log ---
+    trades = fetch_sim_trades(50)
+    st.markdown("**Recent Trade Log**")
+    if trades:
+        trade_rows = []
+        for t in trades:
+            pnl = t.get("pnl_usd")
+            trade_rows.append({
+                "Date": t.get("trade_date", ""),
+                "Action": t.get("action", ""),
+                "Ticker": t.get("ticker", ""),
+                "Shares": f"{float(t['shares']):.4f}" if t.get("shares") else "—",
+                "Price": f"${float(t['price']):.2f}" if t.get("price") else "—",
+                "Value": f"${float(t['usd_value']):.2f}" if t.get("usd_value") else "—",
+                "P&L": f"${pnl:+.2f}" if pnl is not None else "—",
+                "Status": t.get("status", ""),
+            })
+        st.dataframe(pd.DataFrame(trade_rows), use_container_width=True, hide_index=True)
+    else:
+        st.caption("_No trades yet._")
+
+    # --- Fortnightly performance chart ---
+    snapshots = fetch_sim_snapshots(20)
+    if snapshots:
+        st.markdown("---")
+        st.markdown("**Fortnightly Performance**")
+        try:
+            import altair as alt
+
+            df_snap = pd.DataFrame([{
+                "date": s["snapshot_date"],
+                "total_value": float(s["total_value"]),
+                "pnl_pct": float(s["pnl_pct"]),
+            } for s in snapshots]).sort_values("date")
+            df_snap["date"] = pd.to_datetime(df_snap["date"])
+
+            baseline = pd.DataFrame({"y": [1000.0]})
+            ref_line = alt.Chart(baseline).mark_rule(
+                color="#86868B", strokeDash=[4, 4], opacity=0.5
+            ).encode(y="y:Q")
+
+            area = alt.Chart(df_snap).mark_area(
+                line={"color": "#2997FF", "strokeWidth": 2},
+                color=alt.Gradient(
+                    gradient="linear",
+                    stops=[
+                        alt.GradientStop(color="#2997FF", offset=0),
+                        alt.GradientStop(color="transparent", offset=1),
+                    ],
+                    x1=1, x2=1, y1=1, y2=0,
+                ),
+                opacity=0.3,
+            ).encode(
+                x=alt.X("date:T", title=None, axis=alt.Axis(labelColor="#86868B", gridColor="rgba(0,0,0,0.04)", domainColor="rgba(0,0,0,0.1)", tickColor="transparent")),
+                y=alt.Y("total_value:Q", title="Portfolio Value ($)", axis=alt.Axis(labelColor="#86868B", titleColor="#86868B", gridColor="rgba(0,0,0,0.04)", domainColor="rgba(0,0,0,0.1)", tickColor="transparent")),
+                tooltip=[
+                    alt.Tooltip("date:T", format="%b %d, %Y", title="Date"),
+                    alt.Tooltip("total_value:Q", format="$.2f", title="Portfolio Value"),
+                    alt.Tooltip("pnl_pct:Q", format="+.2f", title="P&L %"),
+                ],
+            )
+
+            st.altair_chart(
+                alt.layer(ref_line, area)
+                .properties(height=200, background="transparent")
+                .configure_view(strokeWidth=0),
+                use_container_width=True,
+            )
+        except ImportError:
+            pass
+
+        # Summary table
+        snap_rows = [{
+            "Date": s["snapshot_date"],
+            "Cash": f"${float(s['cash_usd']):.2f}",
+            "Holdings": f"${float(s['holdings_value']):.2f}",
+            "Total": f"${float(s['total_value']):.2f}",
+            "P&L $": f"${float(s['pnl_usd']):+.2f}",
+            "P&L %": f"{float(s['pnl_pct']):+.2f}%",
+        } for s in snapshots]
+        st.dataframe(pd.DataFrame(snap_rows), use_container_width=True, hide_index=True)
 
 
 if __name__ == "__main__":

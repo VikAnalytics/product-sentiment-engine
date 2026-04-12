@@ -52,7 +52,7 @@ REPORTS_DIR=/abs/path/        # default: reports/
 
 ## 3. Apply Supabase Migrations
 
-In the Supabase SQL Editor (or via `supabase db push`), apply all files under `supabase/migrations/` in numeric order — `000` through `014`. See [supabase/README.md](../supabase/README.md) for the full list and what each migration does.
+In the Supabase SQL Editor (or via `supabase db push`), apply all files under `supabase/migrations/` in numeric order — `000` through `015`. See [supabase/README.md](../supabase/README.md) for the full list and what each migration does.
 
 ---
 
@@ -139,6 +139,47 @@ PYTHONPATH=src python src/weekly_brief.py
 
 ---
 
+### 4.8 AI Stock Simulator
+
+Persistent $1,000 virtual portfolio. Uses a five-layer quant strategy (multi-factor ranking, EV gate, signal consensus, regime filter, Markowitz + Kelly) to decide what to buy and sell daily. No real money involved.
+
+**Execute pending trades** (run after `price_fetcher.py`, before `tracker.py`):
+
+```bash
+PYTHONPATH=src python src/sim_trader.py --action execute
+```
+
+Settles any trades queued from yesterday using today's market open price. Also runs risk management: stop-loss (−8%), take-profit (+25%), sentiment stop, and max drawdown guard (−15% from peak → full liquidation).
+
+**Analyze and queue tomorrow's trades** (run after `tracker.py` and `price_correlator.py`):
+
+```bash
+PYTHONPATH=src python src/sim_trader.py --action analyze
+```
+
+Runs the full quant pipeline on today's sentiment data:
+1. Multi-factor scoring (sentiment momentum, price momentum, volatility, signal consistency, historical accuracy) — top 20% of universe only
+2. EV gate: p_win > 55% AND expected return > 3% (from `price_reactions` history, min 5 samples)
+3. Signal consensus: 4/5 factors must be directionally aligned
+4. Regime filter: ≥50% of universe must have positive sentiment momentum (risk-off = hold cash)
+5. Markowitz max-Sharpe optimization (`scipy`) with Ledoit-Wolf covariance shrinkage
+6. Kelly Criterion position sizing (capped at 25% per position)
+7. AI generates rationale text only — does not pick stocks
+
+Queues BUYs in `sim_pending_trades` for tomorrow's execute step. Capital only deploys when all gates pass — cash is held by default.
+
+**Fortnightly performance snapshot** (runs automatically on even-week Mondays):
+
+```bash
+PYTHONPATH=src python src/sim_trader.py --action snapshot
+```
+
+Computes current portfolio value (cash + market value of holdings), records P&L vs $1,000 starting capital, stores in `sim_snapshots`.
+
+**Timing note:** The cron job fires at 5pm EST (after market close). `execute` runs at 5pm but uses the 9:30am open price already stored in `stock_prices` — correctly simulating "bought at open that morning."
+
+---
+
 ## 5. Run the Dashboard Locally
 
 ```bash
@@ -154,10 +195,15 @@ Requires `SUPABASE_URL` and `SUPABASE_KEY` in `.env`. For deployment to Streamli
 The pipeline runs daily via GitHub Actions (`.github/workflows/run_engine.yml`), triggered externally by cron-job.org at 5pm EST. The full sequence:
 
 ```
-scout.py → sec_scout.py → tracker.py → price_fetcher.py → price_correlator.py → report.py
+scout.py → sec_scout.py → price_fetcher.py
+  → sim_trader execute   (settle yesterday's trades at today's open)
+  → tracker.py → price_correlator.py
+  → sim_trader analyze   (queue tomorrow's trades from today's sentiment)
+  → report.py
 ```
 
-On Mondays, `weekly_brief.py` runs after `report.py`.
+On Mondays: `weekly_brief.py` runs after `report.py`.
+On even-week Mondays: `sim_trader snapshot` also runs.
 
 The workflow commits generated reports back to the `reports/` directory automatically.
 

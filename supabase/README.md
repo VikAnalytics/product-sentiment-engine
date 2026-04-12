@@ -23,6 +23,7 @@ All tables, indexes, and the `match_sentiment` RPC are defined in `migrations/`.
 | `012_stock_prices.sql` | Creates `stock_prices` table (`target_id`, `ts TIMESTAMPTZ`, `open`, `high`, `low`, `close`, `volume`). Unique constraint on `(target_id, ts)`. |
 | `013_price_reactions.sql` | Creates `price_reactions` table with inter-event attribution fields (`price_at_event`, `window_return_pct`, `reaction_1d/3d/7d`, `confidence`, etc.). |
 | `014_sector.sql` | Adds `sector VARCHAR(60)` and `is_f500 BOOLEAN DEFAULT FALSE` to `targets`. |
+| `015_simulator.sql` | Creates AI stock simulator tables: `sim_portfolio`, `sim_holdings`, `sim_trades`, `sim_pending_trades`, `sim_snapshots`. Seeds the starting $1,000 portfolio row. |
 
 ---
 
@@ -126,6 +127,84 @@ pros_summary    TEXT
 cons_summary    TEXT
 quotes_summary  TEXT
 updated_at      TIMESTAMPTZ
+```
+
+### sim_portfolio
+
+Singleton row tracking current cash balance and peak value.
+
+```
+id              SERIAL PK
+cash_usd        NUMERIC(12,2)   -- current available cash
+peak_value      NUMERIC(12,2)   -- highest total portfolio value (for drawdown tracking)
+initialized_at  TIMESTAMPTZ
+updated_at      TIMESTAMPTZ
+```
+
+### sim_holdings
+
+One row per open position (ticker currently held).
+
+```
+id              SERIAL PK
+target_id       INTEGER FK → targets
+ticker          VARCHAR(10) UNIQUE
+shares          NUMERIC(14,6)
+avg_buy_price   NUMERIC(12,4)
+total_cost      NUMERIC(12,2)   -- cost basis
+created_at      TIMESTAMPTZ
+updated_at      TIMESTAMPTZ
+```
+
+### sim_trades
+
+Full trade log — every executed or skipped trade.
+
+```
+id              BIGSERIAL PK
+trade_date      DATE
+target_id       INTEGER FK → targets
+ticker          VARCHAR(10)
+action          VARCHAR(4)      -- BUY | SELL
+shares          NUMERIC(14,6)
+price           NUMERIC(12,4)
+usd_value       NUMERIC(12,2)   -- shares × price
+pnl_usd         NUMERIC(12,2)   -- SELL only: proceeds − cost_basis
+status          VARCHAR(12)     -- executed | skipped
+skip_reason     TEXT
+ai_rationale    TEXT            -- quant decision explanation
+created_at      TIMESTAMPTZ
+```
+
+### sim_pending_trades
+
+Trades queued by the analyze step, executed next morning.
+
+```
+id              BIGSERIAL PK
+queued_at       TIMESTAMPTZ
+target_id       INTEGER FK → targets
+ticker          VARCHAR(10)
+action          VARCHAR(4)      -- BUY | SELL
+usd_amount      NUMERIC(12,2)   -- BUY: dollar amount to spend
+sell_all        BOOLEAN         -- SELL: liquidate full position
+ai_rationale    TEXT
+```
+
+### sim_snapshots
+
+Fortnightly portfolio performance snapshots (one row per snapshot date).
+
+```
+id              SERIAL PK
+snapshot_date   DATE UNIQUE
+cash_usd        NUMERIC(12,2)
+holdings_value  NUMERIC(12,2)   -- market value of all open positions
+total_value     NUMERIC(12,2)
+pnl_usd         NUMERIC(12,2)   -- vs $1,000 starting capital
+pnl_pct         NUMERIC(8,4)
+summary_text    TEXT
+created_at      TIMESTAMPTZ
 ```
 
 ---

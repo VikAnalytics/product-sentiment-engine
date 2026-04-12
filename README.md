@@ -25,10 +25,11 @@ Every insight is traceable to a specific HN thread, Reddit post, or SEC filing.
 | Community sentiment | Hacker News + Reddit | Pros, cons, verbatim quotes with source links |
 | Stock price reactions | yfinance 5-min OHLCV bars | Inter-event price attribution per event |
 | Structured intelligence | OpenAI `gpt-4o-mini` | Daily reports + weekly executive brief |
+| AI portfolio simulation | Quant strategy on sentiment + price data | Virtual $1,000 portfolio with daily trades |
 
 Surfaces through two outputs:
 
-- **Streamlit dashboard** — events timeline, sentiment scores, price reaction badges, news feed, competitive rankings
+- **Streamlit dashboard** — events timeline, sentiment scores, price reaction badges, news feed, competitive rankings, AI stock simulator
 - **Market Intelligence Report** — board-ready markdown written daily, stored in `reports/`
 
 ---
@@ -39,6 +40,7 @@ Surfaces through two outputs:
 2. Use the **sidebar** to navigate:
    - **News Feed** — chronological view of all tracked headlines; filter by date and sector
    - **Analysis** — deep dive into a specific company or product
+   - **Simulator** — AI stock simulation portfolio; see open positions, queued trades, and performance
 3. In Analysis mode, select a company or product to see:
    - Events timeline with sentiment scores and implication tags (threat / opportunity / monitor)
    - Price reaction badges for public companies (inter-event %, 1d/3d/7d)
@@ -56,17 +58,21 @@ If you only need to consume insights, you can stop here. The rest of this docume
 ```
 RSS Feeds + SEC EDGAR
         ↓
-   scout.py          NLP filter → OpenAI extracts targets + events → Supabase
-   sec_scout.py      EDGAR submissions API → 8-K/10-Q/10-K events → Supabase
+   scout.py            NLP filter → OpenAI extracts targets + events → Supabase
+   sec_scout.py        EDGAR submissions API → 8-K/10-Q/10-K events → Supabase
         ↓
-   tracker.py        HN + Reddit → local embeddings → pgvector dedupe → OpenAI sentiment → Supabase
-   price_fetcher.py  yfinance 5-min OHLCV bars → Supabase
-   price_correlator.py  Inter-event window attribution → Supabase
+   price_fetcher.py    yfinance 5-min OHLCV bars → Supabase
+   sim_trader.py       execute: settle yesterday's queued trades at today's open price
         ↓
-   report.py         Aggregate + dedupe → OpenAI → reports/market_intelligence_YYYY-MM-DD.md
-   weekly_brief.py   7-day strategic synthesis → reports/weekly_brief_YYYY-WXX.md
+   tracker.py          HN + Reddit → local embeddings → pgvector dedupe → OpenAI sentiment → Supabase
+   price_correlator.py Inter-event window attribution → Supabase
+   sim_trader.py       analyze: multi-factor quant strategy → queue tomorrow's trades
         ↓
-   app.py            Streamlit dashboard
+   report.py           Aggregate + dedupe → OpenAI → reports/market_intelligence_YYYY-MM-DD.md
+   weekly_brief.py     7-day strategic synthesis → reports/weekly_brief_YYYY-WXX.md (Mondays)
+   sim_trader.py       snapshot: fortnightly portfolio performance (even-week Mondays)
+        ↓
+   app.py              Streamlit dashboard
 ```
 
 ---

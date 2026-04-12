@@ -9,8 +9,26 @@ interface Props {
   sectorFilter?: string | null
 }
 
+type HeadlineItem = Awaited<ReturnType<typeof fetchRecentHeadlines>>[number]
+
+interface CompanyGroup {
+  id: number
+  name: string
+  logo_url: string | null
+  domain: string | null
+  sector: string | null
+  is_f500: boolean
+  latestAt: string
+  events: HeadlineItem[]
+}
+
+interface DateGroup {
+  date: string
+  companies: CompanyGroup[]
+}
+
 export default function NewsFeed({ sectorFilter }: Props) {
-  const [items, setItems] = useState<Awaited<ReturnType<typeof fetchRecentHeadlines>>>([])
+  const [items, setItems] = useState<HeadlineItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -23,21 +41,47 @@ export default function NewsFeed({ sectorFilter }: Props) {
 
   const filtered = useMemo(() => {
     if (!sectorFilter) return items
-    return items.filter(i => i.target?.sector === sectorFilter)
+    return items.filter(i => {
+      const sector = i.target?.parent_target?.sector ?? i.target?.sector
+      return sector === sectorFilter
+    })
   }, [items, sectorFilter])
 
-  // group by date
-  const grouped = useMemo(() => {
-    const map: Record<string, typeof filtered> = {}
+  // Group by date → company
+  const grouped = useMemo((): DateGroup[] => {
+    const dateMap: Record<string, Record<string, CompanyGroup>> = {}
+
     for (const item of filtered) {
-      const d = item.created_at.slice(0, 10)
-      map[d] = map[d] ?? []
-      map[d].push(item)
+      const date = item.created_at.slice(0, 10)
+      const isProduct = item.target?.target_type === 'PRODUCT'
+      const parent = isProduct ? item.target?.parent_target : null
+
+      // Root company identity
+      const companyKey = parent ? `p${parent.id}` : `t${item.target?.id}`
+      const companyInfo: Omit<CompanyGroup, 'latestAt' | 'events'> = parent
+        ? { id: parent.id, name: parent.name, logo_url: parent.logo_url, domain: parent.domain, sector: parent.sector ?? item.target?.sector ?? null, is_f500: parent.is_f500 ?? item.target?.is_f500 ?? false }
+        : { id: item.target?.id ?? 0, name: item.target?.name ?? '—', logo_url: item.target?.logo_url ?? null, domain: item.target?.domain ?? null, sector: item.target?.sector ?? null, is_f500: item.target?.is_f500 ?? false }
+
+      dateMap[date] = dateMap[date] ?? {}
+      if (!dateMap[date][companyKey]) {
+        dateMap[date][companyKey] = { ...companyInfo, latestAt: item.created_at, events: [] }
+      }
+      dateMap[date][companyKey].events.push(item)
+      if (item.created_at > dateMap[date][companyKey].latestAt) {
+        dateMap[date][companyKey].latestAt = item.created_at
+      }
     }
-    return Object.entries(map).sort(([a], [b]) => b.localeCompare(a))
+
+    return Object.entries(dateMap)
+      .sort(([a], [b]) => b.localeCompare(a))
+      .map(([date, companies]) => ({
+        date,
+        companies: Object.values(companies).sort((a, b) => b.latestAt.localeCompare(a.latestAt)),
+      }))
   }, [filtered])
 
   const today = new Date().toISOString().slice(0, 10)
+  const totalSignals = filtered.length
 
   if (loading) return (
     <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -58,104 +102,102 @@ export default function NewsFeed({ sectorFilter }: Props) {
           Intelligence <em style={{ fontStyle: 'italic', color: 'var(--gold)' }}>Feed</em>
         </span>
         <span style={{ fontFamily: 'var(--ff-m)', fontSize: 11, color: 'var(--tm)', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
-          <b style={{ color: 'var(--t2)', fontWeight: 400 }}>{filtered.length} signals</b>
+          <b style={{ color: 'var(--t2)', fontWeight: 400 }}>{totalSignals} signals</b>
         </span>
       </div>
+
       <div style={{ flex: 1, overflowY: 'auto' }}>
-        {grouped.map(([date, cards], gi) => (
+        {grouped.map(({ date, companies }) => (
           <div key={date}>
+            {/* Date header */}
             <div style={{
               padding: '8px 24px',
-              fontFamily: 'var(--ff-m)',
-              fontSize: 11,
-              letterSpacing: '0.14em',
-              textTransform: 'uppercase',
-              color: 'var(--tm)',
+              fontFamily: 'var(--ff-m)', fontSize: 11, letterSpacing: '0.14em',
+              textTransform: 'uppercase', color: 'var(--tm)',
               borderBottom: '1px solid var(--br)',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 10,
+              display: 'flex', alignItems: 'center', gap: 10,
             }}>
-              {date === today ? 'Today' : date} &nbsp;·&nbsp; {new Date(date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
+              {date === today ? 'Today' : date}&nbsp;·&nbsp;
+              {new Date(date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
               <span style={{ flex: 1, height: 1, background: 'var(--br)', display: 'block' }} />
             </div>
-            {cards.map((item, i) => {
-              const sc = item.topScore
-              const tag = item.topTag
-              const isPos = sc != null && sc > 0
-              const isNeg = sc != null && sc < 0
+
+            {/* Company blocks */}
+            {companies.map((co, ci) => {
+              const allScores = co.events.map(e => e.topScore).filter((s): s is number => s != null)
+              const avgScore = allScores.length ? allScores.reduce((a, b) => a + b, 0) / allScores.length : null
+              const isPos = avgScore != null && avgScore > 0
+              const isNeg = avgScore != null && avgScore < 0
+
               return (
-                <div
-                  key={item.id}
-                  style={{
-                    display: 'flex',
-                    borderBottom: '1px solid var(--br)',
-                    cursor: 'pointer',
-                    transition: 'background 0.1s',
-                    animation: `cin 0.3s ${0.05 + i * 0.05}s ease both`,
-                  }}
-                  onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-h)')}
-                  onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                >
+                <div key={co.id} style={{ borderBottom: '1px solid var(--br)', animation: `cin 0.3s ${0.05 + ci * 0.04}s ease both` }}>
+                  {/* Company header */}
                   <div style={{
-                    width: 4,
-                    flexShrink: 0,
-                    background: isPos ? 'var(--green)' : isNeg ? 'var(--red)' : 'var(--tm)',
-                    opacity: 0.6,
-                  }} />
-                  <div style={{ flex: 1, padding: '14px 18px' }}>
-                    {/* parent company row — shown for products */}
-                    {item.target?.target_type === 'PRODUCT' && item.target?.parent_target && (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
-                        <Logo logoUrl={item.target.parent_target.logo_url} domain={item.target.parent_target.domain} name={item.target.parent_target.name} size={14} radius="sm" />
-                        <span style={{ fontFamily: 'var(--ff-m)', fontSize: 10, fontWeight: 700, letterSpacing: '0.14em', textTransform: 'uppercase', color: 'var(--gold)' }}>
-                          {item.target.parent_target.name}
-                        </span>
-                      </div>
-                    )}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 6, flexWrap: 'wrap' }}>
-                      {item.target?.target_type !== 'PRODUCT' && item.target && (
-                        <Logo logoUrl={item.target.logo_url} domain={item.target.domain} name={item.target.name} size={18} radius="sm" />
-                      )}
-                      <span style={{ fontFamily: 'var(--ff-m)', fontSize: 11, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: item.target?.target_type === 'PRODUCT' ? 'var(--t2)' : 'var(--t1)' }}>
-                        {item.target?.name ?? '—'}
-                      </span>
-                      {item.target?.sector && (
-                        <span style={{ fontFamily: 'var(--ff-m)', fontSize: 10, letterSpacing: '0.07em', textTransform: 'uppercase', color: 'var(--tm)', background: 'var(--bg-r)', border: '1px solid var(--br)', padding: '2px 6px', borderRadius: 1 }}>
-                          {item.target.sector}
-                        </span>
-                      )}
-                      {item.target?.is_f500 && (
-                        <span style={{ fontFamily: 'var(--ff-m)', fontSize: 10, color: 'var(--gold)', border: '1px solid var(--br-m)', padding: '2px 6px', borderRadius: 1 }}>F500</span>
-                      )}
-                      <span style={{ fontFamily: 'var(--ff-m)', fontSize: 11, color: 'var(--tm)', marginLeft: 'auto' }}>
-                        {relativeTime(item.created_at)}
-                      </span>
-                    </div>
-                    <div style={{ fontFamily: 'var(--ff-d)', fontSize: 20, fontWeight: 400, lineHeight: 1.3, marginBottom: 5, letterSpacing: '0.01em' }}>
-                      {item.headline}
-                    </div>
-                    {item.target?.description && (
-                      <div style={{ fontFamily: 'var(--ff-b)', fontSize: 13, color: 'var(--t2)', fontWeight: 300, fontStyle: 'italic', lineHeight: 1.5 }}>
-                        {item.target.description.slice(0, 120)}{item.target.description.length > 120 ? '…' : ''}
-                      </div>
-                    )}
-                  </div>
-                  <div style={{ padding: '14px 16px 14px 0', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', justifyContent: 'space-between', minWidth: 84, gap: 8 }}>
-                    <span className={scoreClass(sc)} style={{ fontFamily: 'var(--ff-m)', fontSize: 22, fontWeight: 700, lineHeight: 1 }}>
-                      {fmtScore(sc)}
+                    display: 'flex', alignItems: 'center', gap: 8,
+                    padding: '10px 18px 8px 22px',
+                    borderLeft: `3px solid ${isPos ? 'var(--green)' : isNeg ? 'var(--red)' : 'var(--tm)'}`,
+                  }}>
+                    <Logo logoUrl={co.logo_url} domain={co.domain} name={co.name} size={20} radius="sm" />
+                    <span style={{ fontFamily: 'var(--ff-m)', fontSize: 12, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--t1)' }}>
+                      {co.name}
                     </span>
-                    {tag && (
-                      <span className={tagClass(tag)} style={{ fontFamily: 'var(--ff-m)', fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', padding: '3px 8px', borderRadius: 1, border: '1px solid' }}>
-                        {tagLabel(tag)}
+                    {co.sector && (
+                      <span style={{ fontFamily: 'var(--ff-m)', fontSize: 10, letterSpacing: '0.07em', textTransform: 'uppercase', color: 'var(--tm)', background: 'var(--bg-r)', border: '1px solid var(--br)', padding: '2px 6px', borderRadius: 1 }}>
+                        {co.sector}
                       </span>
                     )}
+                    {co.is_f500 && (
+                      <span style={{ fontFamily: 'var(--ff-m)', fontSize: 10, color: 'var(--gold)', border: '1px solid var(--br-m)', padding: '2px 6px', borderRadius: 1 }}>F500</span>
+                    )}
+                    <span style={{ fontFamily: 'var(--ff-m)', fontSize: 11, color: 'var(--tm)', marginLeft: 'auto' }}>
+                      {relativeTime(co.latestAt)}
+                    </span>
                   </div>
+
+                  {/* Event rows */}
+                  {co.events.map((item) => {
+                    const sc = item.topScore
+                    const tag = item.topTag
+                    const isProduct = item.target?.target_type === 'PRODUCT'
+                    const productName = isProduct ? item.target?.name : null
+
+                    return (
+                      <div
+                        key={item.id}
+                        style={{ display: 'flex', borderTop: '1px solid var(--br)', cursor: 'pointer', transition: 'background 0.1s' }}
+                        onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-h)')}
+                        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                      >
+                        <div style={{ width: 3, flexShrink: 0, marginLeft: 22, background: 'var(--br)' }} />
+                        <div style={{ flex: 1, padding: '10px 14px' }}>
+                          {productName && (
+                            <span style={{ fontFamily: 'var(--ff-m)', fontSize: 10, fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--gold)', marginBottom: 3, display: 'block' }}>
+                              {productName}
+                            </span>
+                          )}
+                          <div style={{ fontFamily: 'var(--ff-d)', fontSize: 18, fontWeight: 400, lineHeight: 1.3, letterSpacing: '0.01em' }}>
+                            {item.headline}
+                          </div>
+                        </div>
+                        <div style={{ padding: '10px 16px 10px 0', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', justifyContent: 'center', minWidth: 80, gap: 6 }}>
+                          <span className={scoreClass(sc)} style={{ fontFamily: 'var(--ff-m)', fontSize: 20, fontWeight: 700, lineHeight: 1 }}>
+                            {fmtScore(sc)}
+                          </span>
+                          {tag && (
+                            <span className={tagClass(tag)} style={{ fontFamily: 'var(--ff-m)', fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', padding: '2px 7px', borderRadius: 1, border: '1px solid' }}>
+                              {tagLabel(tag)}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })}
                 </div>
               )
             })}
           </div>
         ))}
+
         {filtered.length === 0 && (
           <div style={{ padding: '60px 24px', textAlign: 'center' }}>
             <span style={{ fontFamily: 'var(--ff-m)', fontSize: 10, color: 'var(--tm)', letterSpacing: '0.2em' }}>NO SIGNALS FOUND</span>

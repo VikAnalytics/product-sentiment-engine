@@ -140,7 +140,7 @@ export async function fetchTargets(): Promise<Target[]> {
   return data ?? []
 }
 
-export async function fetchRecentHeadlines(lookbackHours = 48): Promise<(Event & { target: Target & { parent_target: Pick<Target, 'id' | 'name' | 'logo_url' | 'domain'> | null }; topScore: number | null; topTag: string | null })[]> {
+export async function fetchRecentHeadlines(lookbackHours = 48): Promise<(Event & { target: Target & { parent_target: Pick<Target, 'id' | 'name' | 'logo_url' | 'domain' | 'sector' | 'is_f500'> | null }; topScore: number | null; topTag: string | null })[]> {
   const since = new Date(Date.now() - lookbackHours * 3600 * 1000).toISOString()
   const { data: events, error } = await supabase
     .from('events')
@@ -157,11 +157,11 @@ export async function fetchRecentHeadlines(lookbackHours = 48): Promise<(Event &
   const parentIds = [...new Set(
     (events ?? []).map((e: any) => e.targets?.parent_target_id).filter(Boolean)
   )] as number[]
-  const parentMap: Record<number, Pick<Target, 'id' | 'name' | 'logo_url' | 'domain'>> = {}
+  const parentMap: Record<number, Pick<Target, 'id' | 'name' | 'logo_url' | 'domain' | 'sector' | 'is_f500'>> = {}
   if (parentIds.length > 0) {
     const { data: parents } = await supabase
       .from('targets')
-      .select('id, name, logo_url, domain')
+      .select('id, name, logo_url, domain, sector, is_f500')
       .in('id', parentIds)
     for (const p of parents ?? []) parentMap[p.id] = p
   }

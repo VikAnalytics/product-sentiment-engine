@@ -31,7 +31,7 @@ REPORT_EVENT_MAX_AGE_DAYS = 3      # only include events created within this man
 SIM_STARTING_CAPITAL        = 1000.00  # virtual starting cash
 SIM_MAX_POSITIONS           = 5        # max open positions at once
 SIM_MIN_SCORE               = 3        # min avg sentiment_score to be a buy candidate
-SIM_SENTIMENT_LOOKBACK_HOURS = 24      # how far back to look for sentiment signals in analyze step
+SIM_SENTIMENT_LOOKBACK_HOURS = 72      # how far back to look for sentiment signals in analyze step
 
 _supabase_client = None
 _openai_client = None

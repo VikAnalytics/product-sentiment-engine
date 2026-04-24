@@ -267,4 +267,9 @@ def run_correlator():
 
 
 if __name__ == "__main__":
-    run_correlator()
+    from logging_setup import setup_logging
+    from pipeline_telemetry import step
+
+    setup_logging()
+    with step("price_correlator"):
+        run_correlator()

@@ -78,3 +78,36 @@ PYTHONPATH=src python scripts/merge_duplicate_targets.py --merge 41 92
 ```
 
 You can pass multiple `--merge K D` pairs in one run. Pick the canonical ID (the name you want to keep); the other will be removed after its data is moved.
+
+---
+
+## AI-driven product linking (`ai_link_products.py`)
+
+Alternative to the manual dict in `link_products_to_companies.py`. Uses OpenAI to infer each unlinked product's parent company. Will **create a missing parent company target** when the inferred parent does not yet exist, then set `parent_target_id`.
+
+```bash
+# Preview first — writes nothing
+PYTHONPATH=src python scripts/ai_link_products.py --dry-run
+
+# Apply
+PYTHONPATH=src python scripts/ai_link_products.py
+```
+
+Requires `OPENAI_API_KEY`. Safe to run multiple times — it only inspects products with `parent_target_id IS NULL`.
+
+---
+
+## Seed MACRO (geopolitics/regulatory) themes (`seed_macro_targets.py`)
+
+Required one-time setup after applying migration `017_macro_targets.sql`. Seeds 8 MACRO targets (US-China Trade Tensions, Russia-Ukraine Conflict, Middle East Tensions, Semiconductor Export Controls, Global Tariffs & Trade Policy, OPEC & Energy Policy, AI Regulation, Climate & Clean Energy Policy) and their sector exposures.
+
+```bash
+PYTHONPATH=src python scripts/seed_macro_targets.py
+```
+
+Idempotent:
+- Re-running will not duplicate themes (matches by `name`)
+- Existing rows are upgraded from `COMPANY`/`PRODUCT` to `MACRO` type if needed
+- Exposure rows are upserted on `(macro_target_id, sector)`
+
+To edit the theme list or sector weights, modify the `MACRO_THEMES` dict at the top of the script and re-run. This also updates the MACRO names that `scout.py` constrains AI output to, since the scout loads active themes from the DB at runtime.

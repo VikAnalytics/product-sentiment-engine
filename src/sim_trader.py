@@ -56,27 +56,43 @@ log = logging.getLogger(__name__)
 
 # ── Strategy constants ─────────────────────────────────────────────────────
 STOP_LOSS_PCT          = 0.08   # sell if down 8% from avg cost
+TRAILING_STOP_PCT      = 0.06   # sell if down 6% from post-entry peak (only when already up >2% from cost)
+TRAILING_STOP_MIN_GAIN = 0.02   # trailing stop only armed after position is up 2% from cost
 TAKE_PROFIT_PCT        = 0.25   # sell if up 25%
 SENTIMENT_STOP_SCORE   = -3     # sell if today's avg score drops below this
 MAX_DRAWDOWN_PCT       = 0.15   # liquidate all if portfolio down 15% from peak
-REGIME_THRESHOLD       = 0.50   # 50% of universe must have positive sentiment momentum
-EV_MIN               = 0.03   # 3% minimum expected value to deploy capital
+
+REGIME_THRESHOLD       = 0.40   # 40% of universe must have positive sentiment momentum
+REGIME_MIN_COUNT       = 3      # absolute floor: at least 3 positive names always passes ratio test
+RISK_OFF_DEPLOY_FRAC   = 0.25   # on risk-off, deploy 25% cash on top-1 name (vs 0% before)
+
+EV_MIN                 = 0.015  # 1.5% minimum expected value (reactions stored as fractions now)
 WIN_RATE_MIN           = 0.55   # 55% minimum historical win rate
-MIN_REACTIONS_SAMPLE   = 5     # minimum past reactions needed for EV gate
-SIGNAL_CONSENSUS_MIN   = 4     # need 4 of 5 factors aligned positively
+MIN_REACTIONS_SAMPLE   = 5      # minimum past reactions needed for EV gate
+STRONG_SCORE_OVERRIDE  = 7      # avg_score≥7 + tag=opportunity bypasses EV sample gate
+SIGNAL_CONSENSUS_MIN   = 3      # need 3 of 5 factors aligned positively
+
 MAX_POSITION_WEIGHT    = 0.30   # Markowitz upper bound per stock
 KELLY_CAP              = 0.25   # cap individual Kelly fraction at 25%
-MAX_DEPLOY_FRACTION    = 0.80   # deploy at most 80% of available cash
-PRICE_MOMENTUM_DAYS    = 20    # lookback for price momentum + covariance
-SENTIMENT_MOMENTUM_DAYS = 7    # days for sentiment momentum window
+MAX_DEPLOY_FRACTION    = 0.90   # deploy at most 90% of available cash
+
+PRICE_MOMENTUM_DAYS    = 20     # lookback for price momentum + covariance
+SENTIMENT_MOMENTUM_DAYS = 7     # days for sentiment momentum window
+
+TOP_COHORT_MIN         = 4      # min candidates surviving factor ranking (floor)
+TOP_COHORT_DIVISOR     = 3      # top 1/3 of ranked universe (was 1/5)
+
+ROTATION_MAX_PER_DAY   = 2      # max held positions swapped out per analyze run
+ROTATION_COMPOSITE_THRESHOLD = 0.0  # held with composite < this is candidate for rotation
 
 # Factor weights (must sum to 1.0)
 FACTOR_WEIGHTS = {
-    "sentiment_momentum":  0.30,
-    "price_momentum":      0.25,
+    "sentiment_momentum":  0.25,
+    "price_momentum":      0.20,
     "inv_volatility":      0.15,
     "signal_consistency":  0.15,
-    "historical_accuracy": 0.15,
+    "historical_accuracy": 0.10,
+    "macro_exposure":      0.15,  # geopolitics/regulatory backdrop for the sector
 }
 
 
@@ -110,6 +126,56 @@ def _fetch_open_price(sb, target_id: int, for_date: date) -> Optional[float]:
         return float(val) if val is not None else None
     except Exception as exc:
         log.error("_fetch_open_price(%s, %s): %s", target_id, for_date, exc)
+        return None
+
+
+def _fetch_peak_price_since(sb, target_id: int, since: date) -> Optional[float]:
+    """Max close price for target since `since` date (inclusive). None if no bars."""
+    since_str = f"{since.isoformat()}T00:00:00+00:00"
+    peak = 0.0
+    offset = 0
+    while True:
+        try:
+            resp = (
+                sb.table("stock_prices")
+                .select("close")
+                .eq("target_id", target_id)
+                .gte("ts", since_str)
+                .order("ts")
+                .range(offset, offset + 999)
+                .execute()
+            )
+        except Exception as exc:
+            log.error("_fetch_peak_price_since(%s): %s", target_id, exc)
+            return None
+        batch = resp.data or []
+        for row in batch:
+            c = row.get("close")
+            if c is not None and float(c) > peak:
+                peak = float(c)
+        if len(batch) < 1000:
+            break
+        offset += 1000
+    return peak if peak > 0 else None
+
+
+def _fetch_first_buy_date(sb, ticker: str) -> Optional[date]:
+    """Earliest executed BUY trade_date for this ticker — used as trailing-stop anchor."""
+    try:
+        resp = (
+            sb.table("sim_trades")
+            .select("trade_date")
+            .eq("ticker", ticker)
+            .eq("action", "BUY")
+            .eq("status", "executed")
+            .order("trade_date")
+            .limit(1)
+            .execute()
+        )
+        rows = resp.data or []
+        return date.fromisoformat(rows[0]["trade_date"]) if rows else None
+    except Exception as exc:
+        log.error("_fetch_first_buy_date(%s): %s", ticker, exc)
         return None
 
 
@@ -237,7 +303,9 @@ def _fetch_daily_returns(sb, target_ids: list) -> dict:
 def _fetch_price_reactions_history(sb, target_ids: list) -> dict:
     """
     Fetch historical price_reactions for each target.
-    Returns {target_id: [reaction_7d values]}.
+    Returns {target_id: [reaction_7d values as fractions]} — reactions table stores
+    percentages (e.g. 5.88 for +5.88%); we convert to fractions (0.0588) so all
+    downstream math + format strings (`.1%`) stay unit-consistent.
     """
     result = defaultdict(list)
     for tid in target_ids:
@@ -251,9 +319,8 @@ def _fetch_price_reactions_history(sb, target_ids: list) -> dict:
         for row in (resp.data or []):
             val = row.get("reaction_7d")
             if val is not None:
-                # Weight high-confidence reactions more
                 weight = {"high": 2, "medium": 1, "low": 0.5}.get(row.get("confidence", "low"), 1)
-                result[tid].extend([float(val)] * int(weight))
+                result[tid].extend([float(val) / 100.0] * int(weight))
     return dict(result)
 
 
@@ -288,6 +355,83 @@ def _fetch_sentiment_history(sb, target_ids: list) -> dict:
         result[tid].append((row["created_at"], row["sentiment_score"], row.get("implication_tag")))
 
     return dict(result)
+
+
+def _fetch_macro_exposure_factor(sb, candidates: list) -> dict:
+    """
+    For each candidate, compute a sector-weighted macro backdrop score.
+    Returns {target_id: weighted_avg_macro_sentiment} in roughly [-10, +10]:
+      1. Look up macro_sector_exposure rows for the candidate's sector.
+      2. Fetch recent (7d) MACRO-target sentiment scores.
+      3. Weighted-average: sum(exposure_weight * recent_avg_score) / sum(weights).
+    Negative = headwind (sector under active geopolitical/regulatory threat).
+    Positive = tailwind. Zero if no exposure or no macro sentiment yet.
+    """
+    if not candidates:
+        return {}
+
+    try:
+        exp_rows = (
+            sb.table("macro_sector_exposure")
+            .select("macro_target_id, sector, exposure_weight")
+            .execute()
+            .data
+            or []
+        )
+    except Exception as exc:
+        log.warning("_fetch_macro_exposure: %s", exc)
+        return {c["target_id"]: 0.0 for c in candidates}
+
+    sector_to_exposures: dict = defaultdict(list)
+    macro_ids = set()
+    for r in exp_rows:
+        sector_to_exposures[r["sector"]].append(
+            (r["macro_target_id"], float(r["exposure_weight"]))
+        )
+        macro_ids.add(r["macro_target_id"])
+
+    if not macro_ids:
+        return {c["target_id"]: 0.0 for c in candidates}
+
+    since = (datetime.now(timezone.utc) - timedelta(days=SENTIMENT_MOMENTUM_DAYS)).isoformat()
+    rows = []
+    offset = 0
+    while True:
+        resp = (
+            sb.table("sentiment")
+            .select("target_id, sentiment_score")
+            .in_("target_id", list(macro_ids))
+            .gte("created_at", since)
+            .not_.is_("sentiment_score", "null")
+            .range(offset, offset + 999)
+            .execute()
+        )
+        batch = resp.data or []
+        rows.extend(batch)
+        if len(batch) < 1000:
+            break
+        offset += 1000
+
+    macro_scores: dict = defaultdict(list)
+    for r in rows:
+        macro_scores[r["target_id"]].append(r["sentiment_score"])
+    macro_avg = {mid: sum(s) / len(s) for mid, s in macro_scores.items() if s}
+
+    result = {}
+    for c in candidates:
+        sector = c.get("sector", "") or ""
+        exposures = sector_to_exposures.get(sector, [])
+        if not exposures:
+            result[c["target_id"]] = 0.0
+            continue
+        total_w = 0.0
+        weighted_sum = 0.0
+        for macro_id, weight in exposures:
+            if macro_id in macro_avg:
+                weighted_sum += weight * macro_avg[macro_id]
+                total_w += weight
+        result[c["target_id"]] = (weighted_sum / total_w) if total_w > 0 else 0.0
+    return result
 
 
 def _fetch_todays_sentiment_tags(sb, tickers: list) -> dict:
@@ -351,11 +495,13 @@ def _fetch_todays_sentiment_tags(sb, tickers: list) -> dict:
 
 # ── Layer 1: Multi-Factor Scoring ──────────────────────────────────────────
 
-def _compute_factors(candidates: list, daily_returns: dict,
-                     reactions: dict, sentiment_hist: dict) -> list:
+def _score_candidates(candidates: list, daily_returns: dict,
+                      reactions: dict, sentiment_hist: dict,
+                      macro_exposure: Optional[dict] = None) -> list:
     """
-    Compute 5 raw factors for each candidate, Z-score normalize, compute composite.
-    Returns candidates enriched with factor scores, sorted by composite_score desc.
+    Compute 6 raw factors for each candidate, Z-score normalize, compute composite.
+    Returns ALL candidates enriched with factor scores, sorted by composite_score desc.
+    No cohort cut applied — call _top_cohort() to trim.
     """
     now = datetime.now(timezone.utc)
     cutoff_recent = now - timedelta(days=SENTIMENT_MOMENTUM_DAYS)
@@ -389,7 +535,10 @@ def _compute_factors(candidates: list, daily_returns: dict,
         rxns = reactions.get(tid, [])
         f5 = float(np.mean(rxns)) if rxns else 0.0
 
-        raw.append({**c, "_f1": f1, "_f2": f2, "_f3": f3, "_f4": f4, "_f5": f5})
+        # F6: Macro exposure — sector-weighted avg sentiment of active MACRO themes
+        f6 = float((macro_exposure or {}).get(tid, 0.0))
+
+        raw.append({**c, "_f1": f1, "_f2": f2, "_f3": f3, "_f4": f4, "_f5": f5, "_f6": f6})
 
     if not raw:
         return []
@@ -402,9 +551,9 @@ def _compute_factors(candidates: list, daily_returns: dict,
             return [0.0] * len(vals)
         return list((arr - arr.mean()) / std)
 
-    keys = ["_f1", "_f2", "_f3", "_f4", "_f5"]
+    keys = ["_f1", "_f2", "_f3", "_f4", "_f5", "_f6"]
     factor_names = ["sentiment_momentum", "price_momentum", "inv_volatility",
-                    "signal_consistency", "historical_accuracy"]
+                    "signal_consistency", "historical_accuracy", "macro_exposure"]
     z_matrix = {k: _zscore([r[k] for r in raw]) for k in keys}
 
     for i, r in enumerate(raw):
@@ -416,10 +565,16 @@ def _compute_factors(candidates: list, daily_returns: dict,
         r["factors"] = {name: round(z_matrix[k][i], 3) for k, name in zip(keys, factor_names)}
         r["raw_factors"] = {name: round(r[k], 4) for k, name in zip(keys, factor_names)}
 
-    # Top quintile only (top 20%)
     raw.sort(key=lambda x: x["composite_score"], reverse=True)
-    cutoff_idx = max(1, len(raw) // 5)
-    return raw[:cutoff_idx]
+    return raw
+
+
+def _top_cohort(scored: list) -> list:
+    """Trim to top 1/3 of the ranked universe (with TOP_COHORT_MIN floor)."""
+    if not scored:
+        return []
+    cutoff = max(TOP_COHORT_MIN, len(scored) // TOP_COHORT_DIVISOR)
+    return scored[:cutoff]
 
 
 # ── Layer 2: EV Gate ───────────────────────────────────────────────────────
@@ -436,17 +591,33 @@ def _apply_ev_gate(candidates: list, reactions: dict) -> list:
     for c in candidates:
         tid = c["target_id"]
         rxns = reactions.get(tid, [])
+        avg_score = c.get("avg_score", 0) or 0
+        tag = c.get("dominant_tag", "")
 
         if len(rxns) < MIN_REACTIONS_SAMPLE:
-            log.debug("EV gate: %s skipped — only %d samples (need %d)",
-                      c["ticker"], len(rxns), MIN_REACTIONS_SAMPLE)
+            # Strong-signal override: exceptional sentiment + opportunity tag lets
+            # a new/quiet ticker through with a neutral-prior EV and halved sizing.
+            if avg_score >= STRONG_SCORE_OVERRIDE and tag == "opportunity":
+                passed.append({
+                    **c,
+                    "ev_stats": {
+                        "p_win": 0.55, "avg_gain": 0.02, "avg_loss": -0.02,
+                        "ev": 0.015, "n_samples": len(rxns), "override": True,
+                    },
+                    "ev_reduced": True,
+                })
+                log.info("EV gate: %s STRONG-SIGNAL OVERRIDE (score=%.1f tag=%s n=%d)",
+                         c["ticker"], avg_score, tag, len(rxns))
+            else:
+                log.debug("EV gate: %s skipped — only %d samples (need %d)",
+                          c["ticker"], len(rxns), MIN_REACTIONS_SAMPLE)
             continue
 
         wins   = [r for r in rxns if r > 0]
         losses = [r for r in rxns if r <= 0]
         p_win  = len(wins) / len(rxns)
         avg_gain = float(np.mean(wins))   if wins   else 0.0
-        avg_loss = float(np.mean(losses)) if losses else 0.0  # negative number
+        avg_loss = float(np.mean(losses)) if losses else 0.0
 
         ev = p_win * avg_gain + (1 - p_win) * avg_loss
 
@@ -466,6 +637,7 @@ def _apply_ev_gate(candidates: list, reactions: dict) -> list:
                 "ev": round(ev, 4),
                 "n_samples": len(rxns),
             },
+            "ev_reduced": False,
         })
         log.info("EV gate: %s PASSED — p_win=%.2f, EV=%.3f, n=%d",
                  c["ticker"], p_win, ev, len(rxns))
@@ -476,21 +648,23 @@ def _apply_ev_gate(candidates: list, reactions: dict) -> list:
 
 def _apply_signal_consensus(candidates: list) -> list:
     """
-    Require SIGNAL_CONSENSUS_MIN of 5 factors to be positively aligned (z-score > 0).
+    Require SIGNAL_CONSENSUS_MIN of 6 factors to be positively aligned (z-score > 0).
     """
     passed = []
     factor_names = ["sentiment_momentum", "price_momentum", "inv_volatility",
-                    "signal_consistency", "historical_accuracy"]
+                    "signal_consistency", "historical_accuracy", "macro_exposure"]
+    total = len(factor_names)
     for c in candidates:
         factors = c.get("factors", {})
         positive_count = sum(1 for name in factor_names if factors.get(name, 0) > 0)
         if positive_count >= SIGNAL_CONSENSUS_MIN:
             c["signals_aligned"] = positive_count
             passed.append(c)
-            log.info("Consensus: %s PASSED — %d/5 signals aligned", c["ticker"], positive_count)
+            log.info("Consensus: %s PASSED — %d/%d signals aligned",
+                     c["ticker"], positive_count, total)
         else:
-            log.info("Consensus: %s rejected — only %d/5 signals aligned (need %d)",
-                     c["ticker"], positive_count, SIGNAL_CONSENSUS_MIN)
+            log.info("Consensus: %s rejected — only %d/%d signals aligned (need %d)",
+                     c["ticker"], positive_count, total, SIGNAL_CONSENSUS_MIN)
     return passed
 
 
@@ -498,16 +672,21 @@ def _apply_signal_consensus(candidates: list) -> list:
 
 def _check_regime(all_candidates_raw: list) -> bool:
     """
-    True if ≥ REGIME_THRESHOLD fraction of the full universe has positive
-    sentiment momentum (F1 > 0 before z-scoring).
+    Risk-on if either:
+      - ratio of candidates with positive sentiment momentum ≥ REGIME_THRESHOLD, or
+      - absolute count of positive names ≥ REGIME_MIN_COUNT (noise floor for small universes)
     """
     if not all_candidates_raw:
         return False
-    positive = sum(1 for c in all_candidates_raw if c.get("raw_factors", {}).get("sentiment_momentum", 0) > 0)
+    positive = sum(1 for c in all_candidates_raw
+                   if c.get("raw_factors", {}).get("sentiment_momentum", 0) > 0)
     ratio = positive / len(all_candidates_raw)
-    log.info("Regime: %.0f%% of universe positive (threshold %.0f%%)",
-             ratio * 100, REGIME_THRESHOLD * 100)
-    return ratio >= REGIME_THRESHOLD
+    ok = (ratio >= REGIME_THRESHOLD) or (positive >= REGIME_MIN_COUNT)
+    log.info("Regime: %d/%d positive (%.0f%%). thresh=%.0f%%, count_floor=%d → %s",
+             positive, len(all_candidates_raw), ratio * 100,
+             REGIME_THRESHOLD * 100, REGIME_MIN_COUNT,
+             "RISK-ON" if ok else "RISK-OFF")
+    return ok
 
 
 # ── Layer 5a: Markowitz Max-Sharpe Optimization ────────────────────────────
@@ -590,15 +769,17 @@ def _markowitz_optimize(candidates: list, daily_returns: dict) -> dict:
 
 # ── Layer 5b: Kelly Position Sizing ───────────────────────────────────────
 
-def _kelly_size(candidates: list, markowitz_weights: dict, cash: float) -> list:
+def _kelly_size(candidates: list, markowitz_weights: dict, cash: float,
+                deploy_multiplier: float = 1.0) -> list:
     """
     Apply Kelly Criterion as an upper cap on each Markowitz weight.
     Kelly f* = (p_win * b - (1 - p_win)) / b  where b = avg_gain / |avg_loss|
     Final allocation = min(Markowitz_weight, Kelly_cap, MAX_POSITION_WEIGHT)
-    Deploy at most MAX_DEPLOY_FRACTION of cash.
-    Returns list of {target_id, ticker, usd_amount, allocation_pct, rationale_context}.
+    Deploy at most MAX_DEPLOY_FRACTION * deploy_multiplier of cash.
+    Candidates flagged ev_reduced get their final weight halved (strong-signal
+    override entered with no historical EV evidence).
     """
-    deployable = cash * MAX_DEPLOY_FRACTION
+    deployable = cash * MAX_DEPLOY_FRACTION * deploy_multiplier
     allocations = []
 
     for c in candidates:
@@ -615,11 +796,13 @@ def _kelly_size(candidates: list, markowitz_weights: dict, cash: float) -> list:
         if avg_loss < 1e-6:
             kelly_f = KELLY_CAP
         else:
-            b = avg_gain / avg_loss  # odds ratio
+            b = avg_gain / avg_loss
             kelly_f = (p_win * b - (1 - p_win)) / b
-            kelly_f = max(0.0, min(kelly_f, KELLY_CAP))  # clamp [0, KELLY_CAP]
+            kelly_f = max(0.0, min(kelly_f, KELLY_CAP))
 
         final_weight = min(mw, kelly_f, MAX_POSITION_WEIGHT)
+        if c.get("ev_reduced"):
+            final_weight *= 0.5
         usd_amount = round(deployable * final_weight, 2)
 
         if usd_amount < 10.0:
@@ -742,11 +925,20 @@ def run_execute():
         avg_cost = float(h["avg_buy_price"])
         pct_change = (price - avg_cost) / avg_cost
 
+        # Trailing stop: sell if we've given back 6% from post-entry peak,
+        # but only once the position is up >2% from cost (locks in gains,
+        # avoids doubling with the -8% stop on fresh drawdowns).
+        first_buy = _fetch_first_buy_date(sb, ticker) or (today - timedelta(days=30))
+        peak_price = _fetch_peak_price_since(sb, h["target_id"], first_buy) or price
+        trailing_dd = (price - peak_price) / peak_price if peak_price > 0 else 0.0
+
         trigger = None
         if pct_change <= -STOP_LOSS_PCT:
             trigger = f"stop_loss_{pct_change:.1%}"
         elif pct_change >= TAKE_PROFIT_PCT:
             trigger = f"take_profit_{pct_change:.1%}"
+        elif pct_change > TRAILING_STOP_MIN_GAIN and trailing_dd <= -TRAILING_STOP_PCT:
+            trigger = f"trailing_stop_peak=${peak_price:.2f}_dd={trailing_dd:.1%}"
         else:
             tag_info = today_tags.get(ticker, {})
             if tag_info.get("tag") == "threat" or tag_info.get("avg_score", 0) < SENTIMENT_STOP_SCORE:
@@ -778,13 +970,18 @@ def run_execute():
             portfolio = _get_portfolio(sb)  # refresh after update
             cash = float(portfolio["cash_usd"])
 
-    # ── Execute pending BUY trades ──
+    # ── Execute pending trades (SELLs first so rotation capital frees up) ──
     pending = sb.table("sim_pending_trades").select("*").execute().data or []
     if not pending:
         log.info("execute: no pending trades. Cash: $%.2f", cash)
         return
 
-    log.info("execute: processing %d pending BUY(s)", len(pending))
+    pending.sort(key=lambda p: 0 if p.get("action") == "SELL" else 1)
+    log.info("execute: processing %d pending trade(s) (%d SELL, %d BUY)",
+             len(pending),
+             sum(1 for p in pending if p.get("action") == "SELL"),
+             sum(1 for p in pending if p.get("action") == "BUY"))
+
     portfolio = _get_portfolio(sb)
     cash = float(portfolio["cash_usd"])
 
@@ -794,8 +991,42 @@ def run_execute():
         action = trade["action"]
         rationale = trade.get("ai_rationale", "")
 
+        if action == "SELL":
+            held = _get_holding(sb, ticker)
+            if not held:
+                log.info("execute: rotation SELL %s skipped — not held", ticker)
+                continue
+            price = _fetch_open_price(sb, target_id, today)
+            if price is None:
+                price = float(held["avg_buy_price"])
+            shares = float(held["shares"])
+            proceeds = round(shares * price, 2)
+            pnl = round(proceeds - float(held["total_cost"]), 2)
+            cash = round(cash + proceeds, 2)
+            sb.table("sim_portfolio").update({
+                "cash_usd": cash,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("id", portfolio["id"]).execute()
+            sb.table("sim_holdings").delete().eq("ticker", ticker).execute()
+            sb.table("sim_trades").insert({
+                "trade_date": today.isoformat(),
+                "target_id": target_id,
+                "ticker": ticker,
+                "action": "SELL",
+                "shares": shares,
+                "price": round(price, 4),
+                "usd_value": proceeds,
+                "pnl_usd": pnl,
+                "status": "executed",
+                "ai_rationale": f"ROTATION: {rationale}",
+            }).execute()
+            portfolio = _get_portfolio(sb)
+            log.info("execute: rotation SELL %s @ $%.2f (P&L: $%.2f, cash: $%.2f)",
+                     ticker, price, pnl, cash)
+            continue
+
         if action != "BUY":
-            continue  # only BUYs are queued by the quant system
+            continue
 
         price = _fetch_open_price(sb, target_id, today)
         if price is None:
@@ -950,50 +1181,93 @@ def run_analyze():
         sb.table("sim_pending_trades").delete().neq("id", 0).execute()
         return
 
-    # ── Fetch data for all candidates ──
+    # ── Union held tickers into universe so they share a z-score basis ──
+    held_ids = {h["target_id"] for h in holdings}
+    candidate_ids = {c["target_id"] for c in candidates_raw}
+    missing_held_ids = list(held_ids - candidate_ids)
+    if missing_held_ids:
+        held_tgts = (
+            sb.table("targets")
+            .select("id, name, ticker, sector")
+            .in_("id", missing_held_ids)
+            .execute()
+            .data or []
+        )
+        for t in held_tgts:
+            if not t.get("ticker"):
+                continue
+            candidates_raw.append({
+                "target_id": t["id"],
+                "ticker": t["ticker"],
+                "name": t["name"],
+                "sector": t.get("sector") or "",
+                "avg_score": 0,
+                "dominant_tag": "monitor",
+                "_held_only": True,
+            })
+
+    # ── Fetch data for full universe ──
     target_ids = [c["target_id"] for c in candidates_raw]
-    daily_returns   = _fetch_daily_returns(sb, target_ids)
-    reactions       = _fetch_price_reactions_history(sb, target_ids)
-    sentiment_hist  = _fetch_sentiment_history(sb, target_ids)
+    daily_returns  = _fetch_daily_returns(sb, target_ids)
+    reactions      = _fetch_price_reactions_history(sb, target_ids)
+    sentiment_hist = _fetch_sentiment_history(sb, target_ids)
+    macro_exposure = _fetch_macro_exposure_factor(sb, candidates_raw)
 
-    # ── Layer 1: Factor Scoring + top quintile ──
-    scored = _compute_factors(candidates_raw, daily_returns, reactions, sentiment_hist)
-    log.info("analyze: %d candidates after factor scoring (top quintile)", len(scored))
+    # ── Layer 1: Factor scoring (no cut) ──
+    scored_all = _score_candidates(candidates_raw, daily_returns, reactions,
+                                   sentiment_hist, macro_exposure)
+    log.info("analyze: %d scored (universe incl. held)", len(scored_all))
 
-    # ── Regime check (uses full universe pre-filtering) ──
-    regime_ok = _check_regime(scored if scored else candidates_raw)
-    if not regime_ok:
-        log.info("analyze: RISK-OFF regime — no new buys queued")
-        sb.table("sim_pending_trades").delete().neq("id", 0).execute()
-        return
+    # Partition: new-buy cohort vs held-only (for rotation inspection)
+    new_scored  = [c for c in scored_all if c["target_id"] not in held_ids]
+    held_scored = [c for c in scored_all if c["target_id"] in held_ids]
+    top_new = _top_cohort(new_scored)
+    log.info("analyze: top cohort = %d / %d new candidates", len(top_new), len(new_scored))
+
+    # ── Regime check on full scored universe ──
+    regime_ok = _check_regime(scored_all)
 
     # ── Layer 2: EV Gate ──
-    ev_passed = _apply_ev_gate(scored, reactions)
+    ev_passed = _apply_ev_gate(top_new, reactions)
     log.info("analyze: %d candidates after EV gate", len(ev_passed))
 
     # ── Layer 3: Signal Consensus ──
     final_candidates = _apply_signal_consensus(ev_passed)
     log.info("analyze: %d candidates after signal consensus", len(final_candidates))
 
+    # Cap to remaining position slots
+    slots = max(0, SIM_MAX_POSITIONS - len(holdings))
+    final_candidates = final_candidates[:slots]
+    log.info("analyze: %d candidates after slots cap (slots=%d, held=%d)",
+             len(final_candidates), slots, len(holdings))
+
+    # ── Risk-off partial deploy: if regime bad, keep only the top-1 name ──
+    deploy_multiplier = 1.0
+    if not regime_ok:
+        if final_candidates:
+            final_candidates = final_candidates[:1]
+            deploy_multiplier = RISK_OFF_DEPLOY_FRAC
+            log.info("analyze: RISK-OFF partial deploy — top 1 name at %.0f%% cash cap",
+                     RISK_OFF_DEPLOY_FRAC * 100)
+        else:
+            log.info("analyze: RISK-OFF and nothing cleared gates — holding cash")
+            sb.table("sim_pending_trades").delete().neq("id", 0).execute()
+            return
+
     if not final_candidates:
         log.info("analyze: no candidates cleared all gates — holding cash")
         sb.table("sim_pending_trades").delete().neq("id", 0).execute()
         return
 
-    # Cap to remaining position slots
-    current_positions = len(holdings)
-    slots = max(0, SIM_MAX_POSITIONS - current_positions)
-    final_candidates = final_candidates[:slots]
-    if not final_candidates:
-        log.info("analyze: no position slots available (held: %d / max: %d)", current_positions, SIM_MAX_POSITIONS)
-        return
-
-    # ── Layer 4: Markowitz Optimization ──
+    # ── Layer 4: Markowitz ──
     final_tids = [c["target_id"] for c in final_candidates]
-    markowitz_weights = _markowitz_optimize(final_candidates, {tid: daily_returns.get(tid, []) for tid in final_tids})
+    markowitz_weights = _markowitz_optimize(
+        final_candidates,
+        {tid: daily_returns.get(tid, []) for tid in final_tids},
+    )
 
-    # ── Layer 5: Kelly Sizing ──
-    allocations = _kelly_size(final_candidates, markowitz_weights, cash)
+    # ── Layer 5: Kelly sizing (with risk-off deploy multiplier) ──
+    allocations = _kelly_size(final_candidates, markowitz_weights, cash, deploy_multiplier)
     log.info("analyze: %d allocations from Kelly sizing", len(allocations))
 
     if not allocations:
@@ -1001,18 +1275,50 @@ def run_analyze():
         sb.table("sim_pending_trades").delete().neq("id", 0).execute()
         return
 
-    # ── AI Rationale ──
+    # ── Rotation: if we have new BUYs, evict held positions with composite < 0 ──
+    rotation_sells = []
+    if holdings and held_scored:
+        weak = sorted(
+            [h for h in held_scored if h["composite_score"] < ROTATION_COMPOSITE_THRESHOLD],
+            key=lambda x: x["composite_score"],
+        )
+        max_rotations = min(ROTATION_MAX_PER_DAY, len(allocations))
+        rotation_sells = weak[:max_rotations]
+        if rotation_sells:
+            log.info("analyze: rotation — %d held position(s) flagged (composite<0 vs stronger buys)",
+                     len(rotation_sells))
+
+    # ── AI rationale ──
     overall_rationale = _generate_rationale(allocations, regime_ok, cash)
 
-    # ── Queue trades ──
+    # ── Queue trades (wipe prior queue first) ──
     sb.table("sim_pending_trades").delete().neq("id", 0).execute()
+
+    for rs in rotation_sells:
+        sb.table("sim_pending_trades").insert({
+            "target_id": rs["target_id"],
+            "ticker": rs["ticker"],
+            "action": "SELL",
+            "usd_amount": 0,
+            "sell_all": True,
+            "ai_rationale": (
+                f"rotation: composite={rs['composite_score']:+.3f} — "
+                f"recycling into stronger signals"
+            )[:500],
+        }).execute()
+        log.info("analyze: queued rotation SELL %s (composite=%+.3f)",
+                 rs["ticker"], rs["composite_score"])
+
     for alloc in allocations:
+        ev_stats = alloc.get("ev_stats", {})
         per_trade_rationale = (
-            f"{overall_rationale[:300]} | "
+            f"{overall_rationale[:260]} | "
             f"composite={alloc['composite_score']:+.3f}, "
-            f"p_win={alloc['ev_stats'].get('p_win', 0):.0%}, "
-            f"EV={alloc['ev_stats'].get('ev', 0):.1%}, "
+            f"p_win={ev_stats.get('p_win', 0):.0%}, "
+            f"EV={ev_stats.get('ev', 0):.1%}, "
             f"Kelly={alloc['kelly_cap']:.0%}"
+            + (" [OVERRIDE]" if ev_stats.get("override") else "")
+            + (" [RISK-OFF]" if not regime_ok else "")
         )
         sb.table("sim_pending_trades").insert({
             "target_id": alloc["target_id"],
@@ -1022,11 +1328,12 @@ def run_analyze():
             "sell_all": False,
             "ai_rationale": per_trade_rationale[:500],
         }).execute()
-        log.info("analyze: queued BUY %s $%.2f (composite=%+.3f, p_win=%.0f%%, EV=%.1f%%)",
+        log.info("analyze: queued BUY %s $%.2f (composite=%+.3f, p_win=%.0f%%, EV=%.1f%%%s)",
                  alloc["ticker"], alloc["usd_amount"],
                  alloc["composite_score"],
-                 alloc["ev_stats"].get("p_win", 0) * 100,
-                 alloc["ev_stats"].get("ev", 0) * 100)
+                 ev_stats.get("p_win", 0) * 100,
+                 ev_stats.get("ev", 0) * 100,
+                 " OVERRIDE" if ev_stats.get("override") else "")
 
     log.info("analyze: done. %s", overall_rationale[:100])
 
@@ -1092,16 +1399,126 @@ def run_snapshot():
     log.info("snapshot: %s — total=$%.2f P&L=$%+.2f (%+.2f%%)", today, total_value, pnl_usd, pnl_pct)
 
 
+# ── diagnose ───────────────────────────────────────────────────────────────
+
+def run_diagnose():
+    """Print funnel stage counts. Read-only; no trades queued."""
+    sb = get_supabase()
+    portfolio = _get_portfolio(sb)
+    holdings = _get_all_holdings(sb)
+    pending = sb.table("sim_pending_trades").select("*").execute().data or []
+
+    print("=" * 70)
+    print(f"PORTFOLIO: cash=${float(portfolio['cash_usd']):.2f} "
+          f"peak=${float(portfolio.get('peak_value') or 0):.2f}")
+    print(f"HOLDINGS: {len(holdings)}  PENDING: {len(pending)}")
+    print("=" * 70)
+
+    since = (datetime.now(timezone.utc) - timedelta(hours=SIM_SENTIMENT_LOOKBACK_HOURS)).isoformat()
+    rows = []
+    offset = 0
+    while True:
+        resp = (
+            sb.table("sentiment")
+            .select("target_id, sentiment_score, implication_tag, "
+                    "targets(id, name, ticker, sector)")
+            .gte("created_at", since)
+            .not_.is_("sentiment_score", "null")
+            .range(offset, offset + 999)
+            .execute()
+        )
+        batch = resp.data or []
+        rows.extend(batch)
+        if len(batch) < 1000:
+            break
+        offset += 1000
+
+    rows = [r for r in rows if r.get("targets") and r["targets"].get("ticker")]
+
+    grp: dict = defaultdict(lambda: {"scores": [], "tags": [], "name": "", "ticker": "", "sector": ""})
+    for r in rows:
+        tid = r["target_id"]
+        grp[tid]["scores"].append(r["sentiment_score"])
+        grp[tid]["name"] = r["targets"]["name"]
+        grp[tid]["ticker"] = r["targets"]["ticker"]
+        grp[tid]["sector"] = r["targets"].get("sector") or ""
+        if r.get("implication_tag"):
+            grp[tid]["tags"].append(r["implication_tag"])
+
+    tag_priority = {"threat": 0, "opportunity": 1, "monitor": 2, "no_action": 3}
+    candidates_raw = []
+    for tid, g in grp.items():
+        if not g["scores"]:
+            continue
+        avg = round(sum(g["scores"]) / len(g["scores"]), 1)
+        if avg < SIM_MIN_SCORE:
+            continue
+        candidates_raw.append({
+            "target_id": tid, "ticker": g["ticker"], "name": g["name"],
+            "sector": g["sector"], "avg_score": avg,
+            "dominant_tag": (min(g["tags"], key=lambda t: tag_priority.get(t, 99))
+                             if g["tags"] else "monitor"),
+        })
+
+    print(f"\nSENTIMENT rows ({SIM_SENTIMENT_LOOKBACK_HOURS}h): {len(rows)} "
+          f"→ {len(grp)} unique tickers → {len(candidates_raw)} pass score≥{SIM_MIN_SCORE}")
+
+    if not candidates_raw:
+        print("  [STOP] no candidates")
+        return
+
+    tids = [c["target_id"] for c in candidates_raw]
+    dr = _fetch_daily_returns(sb, tids)
+    rx = _fetch_price_reactions_history(sb, tids)
+    sh = _fetch_sentiment_history(sb, tids)
+    mx = _fetch_macro_exposure_factor(sb, candidates_raw)
+
+    scored = _score_candidates(candidates_raw, dr, rx, sh, mx)
+    top = _top_cohort(scored)
+    print(f"SCORED: {len(scored)} → TOP COHORT (1/{TOP_COHORT_DIVISOR}, min={TOP_COHORT_MIN}): {len(top)}")
+    for c in top:
+        mraw = c.get("raw_factors", {}).get("macro_exposure", 0.0)
+        print(f"  {c['ticker']:7s} composite={c['composite_score']:+.3f}  "
+              f"score={c.get('avg_score',0):+.1f}  "
+              f"macro={mraw:+.2f}  tag={c.get('dominant_tag','')}")
+
+    regime_ok = _check_regime(scored)
+    print(f"REGIME: {'RISK-ON' if regime_ok else 'RISK-OFF'}")
+
+    ev_passed = _apply_ev_gate(top, rx)
+    print(f"EV GATE: {len(top)} → {len(ev_passed)}")
+    for c in ev_passed:
+        ev = c["ev_stats"]
+        flag = " [OVERRIDE]" if ev.get("override") else ""
+        print(f"  {c['ticker']:7s} p_win={ev.get('p_win', 0):.0%} "
+              f"EV={ev.get('ev', 0):.1%} n={ev.get('n_samples', 0)}{flag}")
+
+    consensus = _apply_signal_consensus(ev_passed)
+    print(f"CONSENSUS ({SIGNAL_CONSENSUS_MIN}/6): {len(ev_passed)} → {len(consensus)}")
+    for c in consensus:
+        print(f"  {c['ticker']:7s} signals_aligned={c.get('signals_aligned', 0)}/6")
+
+    print(f"\nWould queue BUYs for {len(consensus[:max(0, SIM_MAX_POSITIONS - len(holdings))])} name(s)")
+
+
 # ── CLI ────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    from logging_setup import setup_logging
+    from pipeline_telemetry import step
+
+    setup_logging()
+
     parser = argparse.ArgumentParser(description="Quantitative AI stock simulation trader")
-    parser.add_argument("--action", choices=["execute", "analyze", "snapshot"], required=True)
+    parser.add_argument("--action", choices=["execute", "analyze", "snapshot", "diagnose"], required=True)
     args = parser.parse_args()
 
-    if args.action == "execute":
-        run_execute()
-    elif args.action == "analyze":
-        run_analyze()
-    elif args.action == "snapshot":
-        run_snapshot()
+    _actions = {
+        "execute":  ("sim_execute",  run_execute),
+        "analyze":  ("sim_analyze",  run_analyze),
+        "snapshot": ("sim_snapshot", run_snapshot),
+        "diagnose": ("sim_diagnose", run_diagnose),
+    }
+    step_name, fn = _actions[args.action]
+    with step(step_name):
+        fn()

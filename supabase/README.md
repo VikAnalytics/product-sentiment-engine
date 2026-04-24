@@ -6,25 +6,29 @@ All tables, indexes, and the `match_sentiment` RPC are defined in `migrations/`.
 
 ## Migrations
 
+Filenames below are exact — apply in numeric order.
+
 | File | What It Does |
 |------|-------------|
 | `000_initial_schema.sql` | Enables pgvector. Creates `targets`, `sentiment`, and `match_sentiment` (3-arg). |
 | `001_events_and_sentiment_event_id.sql` | Creates `events`. Adds `event_id` FK to `sentiment`. Upgrades `match_sentiment` to 4-arg (adds optional `p_event_id`). |
-| `002_target_sentiment_summary.sql` | Creates `target_sentiment_summary` for AI-consolidated per-target pros/cons. |
-| `003_logo_url.sql` | Adds `logo_url` to `targets`. |
-| `004_domain.sql` | Adds `domain` to `targets` for favicon lookup. |
-| `005_parent_target_id.sql` | Adds `parent_target_id` (self-referencing FK) to link products to parent companies. |
+| `002_targets_parent_for_products.sql` | Adds `parent_target_id` (self-referencing FK) to link products to parent companies. |
+| `003_events_cached_analysis.sql` | Adds `cached_analysis` and `cached_analysis_at` to `events` for storing AI-generated strategic analysis. |
+| `004_targets_logo_url.sql` | Adds `logo_url` to `targets`. |
+| `005_targets_domain.sql` | Adds `domain` to `targets` for favicon / Clearbit lookup. |
 | `006_rls_read_policies.sql` | RLS read policies on `targets`, `events`, `sentiment` for anon key access. Required if dashboard uses the anon key. |
-| `007_ticker.sql` | Adds `ticker VARCHAR(10)` to `targets` for price data. |
+| `007_target_sentiment_summary.sql` | Creates `target_sentiment_summary` for AI-consolidated per-target pros/cons. |
 | `008_sentiment_score.sql` | Adds `sentiment_score SMALLINT` to `sentiment` (−10 to +10). |
 | `009_implication_tag.sql` | Adds `implication_tag VARCHAR(20)` to `sentiment` with CHECK constraint (`threat`, `opportunity`, `monitor`, `no_action`). |
 | `010_source_type.sql` | Adds `source_type VARCHAR(80)` to `sentiment` (pipe-separated source names, e.g. `hn\|reddit`). |
-| `011_cached_analysis.sql` | Adds `cached_analysis` and `cached_analysis_at` to `events` for storing AI-generated strategic analysis. |
+| `011_ticker.sql` | Adds `ticker VARCHAR(10)` to `targets` for price data. |
 | `012_stock_prices.sql` | Creates `stock_prices` table (`target_id`, `ts TIMESTAMPTZ`, `open`, `high`, `low`, `close`, `volume`). Unique constraint on `(target_id, ts)`. |
 | `013_price_reactions.sql` | Creates `price_reactions` table with inter-event attribution fields (`price_at_event`, `window_return_pct`, `reaction_1d/3d/7d`, `confidence`, etc.). |
 | `014_sector.sql` | Adds `sector VARCHAR(60)` and `is_f500 BOOLEAN DEFAULT FALSE` to `targets`. |
 | `015_simulator.sql` | Creates AI stock simulator tables: `sim_portfolio`, `sim_holdings`, `sim_trades`, `sim_pending_trades`, `sim_snapshots`. Seeds the starting $1,000 portfolio row. **Note:** if applied before `peak_value` was added, run: `ALTER TABLE public.sim_portfolio ADD COLUMN IF NOT EXISTS peak_value NUMERIC(12,2) NOT NULL DEFAULT 1000.00;` |
 | `016_rls_remaining_tables.sql` | Enables RLS + read-only anon policies on `stock_prices`, `price_reactions`, `target_sentiment_summary`, and all `sim_*` tables (missed by migration 006). |
+| `017_macro_targets.sql` | Extends `targets.target_type` CHECK to include `MACRO`. Creates `macro_sector_exposure(macro_target_id, sector, exposure_weight 0..1)`. Run `scripts/seed_macro_targets.py` after applying to populate 8 themes + sector exposures. |
+| `018_pipeline_runs.sql` | Creates `pipeline_runs` telemetry table (`step_name`, `started_at`, `ended_at`, `duration_ms`, `status`, `rows_processed`, `error_message`, `extra JSONB`). Written to by `src/pipeline_telemetry.py` — graceful no-op if missing. |
 
 ---
 
@@ -37,7 +41,7 @@ Companies and products being tracked.
 ```
 id                BIGINT PK
 name              TEXT
-target_type       TEXT        -- "COMPANY" or "PRODUCT"
+target_type       TEXT        -- "COMPANY" | "PRODUCT" | "MACRO" (migration 017)
 description       TEXT
 status            TEXT        -- "tracking" (pipeline only processes these)
 logo_url          TEXT
@@ -207,6 +211,44 @@ pnl_pct         NUMERIC(8,4)
 summary_text    TEXT
 created_at      TIMESTAMPTZ
 ```
+
+### macro_sector_exposure
+
+Maps MACRO (geopolitics/regulatory) themes to the sectors they influence.
+Used by the simulator's `macro_exposure` factor.
+
+```
+id              SERIAL PK
+macro_target_id INTEGER FK → targets (must be target_type='MACRO')
+sector          VARCHAR(60)     -- one of the sector names used in targets.sector
+exposure_weight NUMERIC(3,2)    -- 0..1, enforced by CHECK
+created_at      TIMESTAMPTZ
+UNIQUE(macro_target_id, sector)
+```
+
+Seeded by `scripts/seed_macro_targets.py` with 8 themes (US-China, Russia-Ukraine,
+Semi Export Controls, Middle East, OPEC, Tariffs, AI Regulation, Climate).
+
+### pipeline_runs
+
+Per-step telemetry for the daily pipeline. Written by `src/pipeline_telemetry.py`.
+
+```
+id              BIGSERIAL PK
+step_name       VARCHAR(60)     -- scout | tracker | sec_scout | price_fetcher |
+                                -- price_correlator | report | weekly_brief |
+                                -- sim_execute | sim_analyze | sim_snapshot | sim_diagnose
+started_at      TIMESTAMPTZ     -- inserted when the step begins
+ended_at        TIMESTAMPTZ     -- updated on success or failure
+duration_ms     INTEGER
+status          VARCHAR(20)     -- running | success | failed (CHECK constraint)
+rows_processed  INTEGER         -- optional, set via step.rows(n)
+error_message   TEXT            -- on failure, truncated to 2000 chars
+extra           JSONB           -- freeform metadata via step.note(**kwargs)
+```
+
+Indexed on `(step_name, started_at DESC)` and `(status, started_at DESC)` for
+fast "recent failures" / "trend per step" queries.
 
 ---
 

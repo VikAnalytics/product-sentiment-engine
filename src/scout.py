@@ -56,6 +56,21 @@ CORE_LEMMAS = {
     # Management / strategy
     "ceo", "cfo", "cto", "chairman", "appoint", "replace", "succession",
     "strategy", "pivot", "restructure", "reorganize",
+    # Geopolitics — conflict / security
+    "war", "invasion", "invade", "conflict", "ceasefire", "armistice",
+    "strike", "missile", "drone", "nuclear", "escalate", "escalation",
+    "retaliate", "retaliation", "truce", "hostage", "refugee",
+    # Geopolitics — trade / policy
+    "embargo", "export-control", "protectionism", "reshore", "reshoring",
+    "onshore", "chip-ban", "tech-ban", "decouple", "decoupling",
+    "nearshore", "subsidy", "stimulus",
+    # Geopolitics — blocs / orgs
+    "nato", "brics", "opec", "eu", "un", "wto", "g7", "g20", "asean",
+    # Geopolitics — diplomacy / actors
+    "summit", "treaty", "accord", "alliance", "diplomat", "envoy",
+    "election", "coup", "regime", "dictator", "president", "premier",
+    "prime-minister", "chancellor", "parliament", "congress",
+    "espionage", "cyberattack", "cybersecurity", "infiltrate",
 }
 
 RSS_FEEDS = [
@@ -82,6 +97,13 @@ RSS_FEEDS = [
     "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&dateb=&owner=include&count=20&output=atom",
     "https://www.ftc.gov/feeds/press-release.xml",
     "https://www.fda.gov/about-fda/contact-fda/stay-informed/rss-feeds/fda-news-releases/rss.xml",
+    # Geopolitics / global policy
+    "https://feeds.reuters.com/Reuters/worldNews",
+    "https://feeds.bbci.co.uk/news/world/rss.xml",
+    "https://apnews.com/hub/world-news?format=rss",
+    "https://www.aljazeera.com/xml/rss/all.xml",
+    "https://www.politico.eu/feed/",
+    "https://foreignpolicy.com/feed/",
 ]
 
 
@@ -118,10 +140,57 @@ def _resolve_parent_id(supabase, parent_company_name: str) -> Optional[int]:
     return None
 
 
+def _save_macro_event(name: str, headline: str) -> None:
+    """
+    Append an event to an existing MACRO target. Never creates new MACRO rows —
+    themes are seeded via scripts/seed_macro_targets.py so the AI can only
+    attach news to known themes.
+    """
+    supabase = get_supabase()
+    try:
+        tgt = (
+            supabase.table("targets")
+            .select("id")
+            .eq("target_type", "MACRO")
+            .eq("name", name)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        if not tgt:
+            logger.info("   -> [MACRO] %s not in seeded themes. Skipping.", name)
+            return
+        target_id = tgt[0]["id"]
+        headline = (headline or "").strip()
+        if not headline:
+            return
+        dup = (
+            supabase.table("events")
+            .select("id")
+            .eq("target_id", target_id)
+            .eq("headline", headline)
+            .execute()
+            .data
+            or []
+        )
+        if dup:
+            logger.info("   -> [MACRO] %s already has event: \"%s\". Skipping.", name, headline[:50])
+            return
+        supabase.table("events").insert({"target_id": target_id, "headline": headline}).execute()
+        logger.info("   🌐 New event for [MACRO] %s: %s", name, headline[:60])
+    except Exception as e:
+        logger.exception("Database error for MACRO %s", name)
+        logger.error("   ❌ Database Error for MACRO %s: %s", name, e)
+
+
 def save_target_to_db(target_type: str, name: str, description: str, parent_company_name: str = "") -> None:
-    """Saves the extracted company or product to Supabase."""
+    """Saves the extracted company, product, or macro-theme event to Supabase."""
     target_type = target_type.strip().upper()
     name = name.strip()
+    if target_type == "MACRO":
+        _save_macro_event(name, description)
+        return
     if target_type not in ("COMPANY", "PRODUCT"):
         return
 
@@ -199,18 +268,19 @@ def save_target_to_db(target_type: str, name: str, description: str, parent_comp
 def _parse_ai_extraction_line(line: str) -> Optional[Tuple[str, str, str, str]]:
     """
     Parse a single line of AI output.
-    COMPANY: TYPE | Name | Description
-    PRODUCT: TYPE | Name | Description | Parent Company (or NONE)
+      COMPANY | Name | Description
+      PRODUCT | Name | Description | Parent Company (or NONE)
+      MACRO   | Theme Name | Description
     Returns (target_type, name, description, parent_company) or None if invalid.
     """
     line = line.strip()
     if "|" not in line:
         return None
-    parts = line.split("|", 3)  # max 4 parts
+    parts = line.split("|", 3)
     if len(parts) < 3:
         return None
     target_type = parts[0].strip().upper()
-    if target_type not in ("COMPANY", "PRODUCT"):
+    if target_type not in ("COMPANY", "PRODUCT", "MACRO"):
         return None
     name = parts[1].strip()
     description = parts[2].strip()
@@ -218,6 +288,23 @@ def _parse_ai_extraction_line(line: str) -> Optional[Tuple[str, str, str, str]]:
     if not name:
         return None
     return (target_type, name, description, parent_company)
+
+
+def _fetch_macro_theme_names() -> list:
+    """Load seeded MACRO theme names so the prompt can constrain output."""
+    try:
+        resp = (
+            get_supabase()
+            .table("targets")
+            .select("name")
+            .eq("target_type", "MACRO")
+            .eq("status", "tracking")
+            .execute()
+        )
+        return [r["name"] for r in (resp.data or [])]
+    except Exception as e:
+        logger.warning("Could not load MACRO themes: %s", e)
+        return []
 
 
 def run_scout() -> None:
@@ -248,20 +335,28 @@ def run_scout() -> None:
     )
     batch_text = "\n---\n".join(articles_to_analyze)
 
+    macro_themes = _fetch_macro_theme_names()
+    macro_list = "\n".join(f"  - {t}" for t in macro_themes) if macro_themes else "  (none seeded)"
+
     prompt = f"""
-    You are an expert tech market analyst. Read the following batch of news articles.
-    Extract EVERY major COMPANY event and EVERY new PRODUCT launch mentioned across all articles.
+    You are an expert market and geopolitics analyst. Read the following batch of news articles.
+    Extract EVERY COMPANY event, EVERY new PRODUCT launch, AND attach relevant MACRO themes.
 
     Rules:
-    1. A single article might mention multiple companies and products. Extract all of them.
-    2. Format your response exactly like this, with one entity per line:
-    COMPANY | [Company Name] | [1-sentence summary of event]
-    PRODUCT | [Product Name] | [1-sentence summary of launch] | [Parent Company Name or NONE]
+    1. One article can produce MULTIPLE lines — extract every affected company, product, and macro theme.
+    2. FAN OUT geopolitics news to ALL plausibly-affected public companies.
+       Example: "US expands chip export ban to China" → emit COMPANY lines for NVIDIA, AMD, TSMC, ASML, Intel, Applied Materials, AND a MACRO line for "Semiconductor Export Controls".
+       Example: "OPEC cuts production 2M bpd" → COMPANY lines for ExxonMobil, Chevron, Delta Air Lines, United Airlines, AND a MACRO line for "OPEC & Energy Policy".
+    3. MACRO themes MUST match one of these seeded names EXACTLY (or omit — do not invent new themes):
+{macro_list}
+    4. Format your response with one entity per line, using '|' as separator:
+       COMPANY | [Company Name] | [1-sentence summary of the event for this company]
+       PRODUCT | [Product Name] | [1-sentence summary of launch] | [Parent Company Name or NONE]
+       MACRO   | [Exact theme name from the list above] | [1-sentence summary of the geopolitical/policy event]
 
-    For PRODUCT lines, always include the parent company name as the 4th field (e.g. Apple for AirPods, Google for Pixel).
-    If the parent company is unknown or not mentioned, write NONE.
-    Do not include any other conversational text, headers, or markdown.
-    If absolutely nothing is found, output NONE.
+    5. For PRODUCT lines, always include the parent company name as the 4th field.
+    6. Do not include conversational text, headers, or markdown fences.
+    7. If absolutely nothing is found, output NONE.
 
     Articles:
     {batch_text}
@@ -284,5 +379,10 @@ def run_scout() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-    run_scout()
+    from logging_setup import setup_logging
+    from pipeline_telemetry import step
+
+    setup_logging()
+    logging.basicConfig(level=logging.INFO, format="%(message)s")  # no-op if handlers exist
+    with step("scout"):
+        run_scout()

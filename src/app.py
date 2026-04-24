@@ -1943,6 +1943,7 @@ def render_news_tab(targets: list) -> None:
         target = targets_by_id.get(e.get("target_id"), {})
         company = target.get("name") or "Unknown"
         sector = (target.get("sector") or "").strip()
+        is_macro = (target.get("target_type") or "").upper() == "MACRO"
         headline = (e.get("headline") or "").strip() or "(no headline)"
 
         # Relative time
@@ -1977,24 +1978,165 @@ def render_news_tab(targets: list) -> None:
             f'<span style="font-size:0.8rem;margin-left:4px;">{tag_emoji.get(tag, "")} {tag}</span>'
             if tag else ""
         )
-        sector_pill = (
-            f'<span style="font-size:0.72rem;color:#A1A1A6;background:rgba(255,255,255,0.06);'
-            f'padding:2px 8px;border-radius:20px;margin-left:6px;">{_he(sector)}</span>'
-            if sector else ""
-        )
+        if is_macro:
+            type_pill = (
+                '<span style="font-size:0.72rem;color:#fff;background:#7c3aed;'
+                'padding:2px 8px;border-radius:20px;margin-left:6px;">🌐 Macro Theme</span>'
+            )
+        elif sector:
+            type_pill = (
+                f'<span style="font-size:0.72rem;color:#A1A1A6;background:rgba(255,255,255,0.06);'
+                f'padding:2px 8px;border-radius:20px;margin-left:6px;">{_he(sector)}</span>'
+            )
+        else:
+            type_pill = ""
+
+        border_color = "rgba(124,58,237,0.35)" if is_macro else "rgba(255,255,255,0.08)"
+        bg_color = "rgba(124,58,237,0.06)" if is_macro else "rgba(255,255,255,0.03)"
 
         st.markdown(
-            f'<div style="border:1px solid rgba(255,255,255,0.08);border-radius:12px;'
-            f'padding:14px 18px;margin-bottom:10px;background:rgba(255,255,255,0.03);">'
+            f'<div style="border:1px solid {border_color};border-radius:12px;'
+            f'padding:14px 18px;margin-bottom:10px;background:{bg_color};">'
             f'<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">'
             f'<span style="font-size:0.82rem;font-weight:700;color:#F5F5F7;">{_he(company)}</span>'
-            f'{sector_pill}'
+            f'{type_pill}'
             f'<span style="margin-left:auto;font-size:0.72rem;color:#6b7280;">{age}</span>'
             f'</div>'
             f'<div style="font-size:0.92rem;font-weight:600;color:#E5E5EA;margin-bottom:6px;">{_he(headline)}</div>'
             f'<div style="display:flex;align-items:center;gap:6px;">{score_badge}{tag_badge}</div>'
             + (f'<div style="font-size:0.8rem;color:#A1A1A6;margin-top:8px;line-height:1.5;">{_he(desc)}</div>' if desc else "")
             + f'</div>',
+            unsafe_allow_html=True,
+        )
+
+
+def render_macro_tab(targets: list) -> None:
+    """Macro themes: geopolitical/regulatory backdrop driving sector exposure."""
+    from datetime import datetime, timezone, timedelta
+
+    st.markdown(
+        '<div class="section-head">Macro Themes</div>'
+        '<div class="section-sub">Geopolitical and regulatory themes that feed the simulator\'s macro_exposure factor. '
+        'Each theme\'s sentiment flows into companies in its exposed sectors.</div>',
+        unsafe_allow_html=True,
+    )
+
+    macros = [t for t in targets if (t.get("target_type") or "").upper() == "MACRO"]
+    if not macros:
+        st.info(
+            "No MACRO themes seeded yet. Apply migration `017_macro_targets.sql` and run "
+            "`PYTHONPATH=src python scripts/seed_macro_targets.py`."
+        )
+        return
+
+    sb = get_supabase()
+
+    try:
+        exp_rows = (
+            sb.table("macro_sector_exposure")
+            .select("macro_target_id, sector, exposure_weight")
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        exp_rows = []
+    exposures_by_macro: dict = {}
+    for r in exp_rows:
+        exposures_by_macro.setdefault(r["macro_target_id"], []).append(
+            (r["sector"], float(r["exposure_weight"]))
+        )
+
+    since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    macro_ids = [m["id"] for m in macros]
+
+    scores_by_macro: dict = {}
+    if macro_ids:
+        rows = []
+        offset = 0
+        while True:
+            resp = (
+                sb.table("sentiment")
+                .select("target_id, sentiment_score")
+                .in_("target_id", macro_ids)
+                .gte("created_at", since)
+                .not_.is_("sentiment_score", "null")
+                .range(offset, offset + 999)
+                .execute()
+            )
+            batch = resp.data or []
+            rows.extend(batch)
+            if len(batch) < 1000:
+                break
+            offset += 1000
+        for r in rows:
+            scores_by_macro.setdefault(r["target_id"], []).append(r["sentiment_score"])
+
+    event_counts: dict = {}
+    if macro_ids:
+        try:
+            evts = (
+                sb.table("events")
+                .select("target_id")
+                .in_("target_id", macro_ids)
+                .execute()
+                .data
+                or []
+            )
+            for ev in evts:
+                event_counts[ev["target_id"]] = event_counts.get(ev["target_id"], 0) + 1
+        except Exception:
+            pass
+
+    macros_sorted = sorted(
+        macros,
+        key=lambda m: (
+            (sum(scores_by_macro.get(m["id"], [])) / len(scores_by_macro.get(m["id"], []))) if scores_by_macro.get(m["id"]) else 0
+        ),
+    )
+
+    for m in macros_sorted:
+        scores = scores_by_macro.get(m["id"], [])
+        avg_score = (sum(scores) / len(scores)) if scores else None
+        n = len(scores)
+        ev_count = event_counts.get(m["id"], 0)
+
+        score_color = "#6b7280"
+        if avg_score is not None:
+            if avg_score >= 3: score_color = "#65a30d"
+            elif avg_score <= -3: score_color = "#ea580c"
+            if avg_score >= 7: score_color = "#16a34a"
+            if avg_score <= -7: score_color = "#dc2626"
+
+        score_badge = (
+            f'<span style="background:{score_color};color:#fff;font-size:0.75rem;'
+            f'font-weight:700;padding:3px 10px;border-radius:20px;">{avg_score:+.1f}</span>'
+            if avg_score is not None
+            else '<span style="color:#6b7280;font-size:0.75rem;">no sentiment yet</span>'
+        )
+
+        exposures = exposures_by_macro.get(m["id"], [])
+        exposures.sort(key=lambda x: x[1], reverse=True)
+        exposure_pills = "".join(
+            f'<span style="display:inline-block;font-size:0.7rem;color:#A1A1A6;'
+            f'background:rgba(124,58,237,0.12);border:1px solid rgba(124,58,237,0.25);'
+            f'padding:2px 8px;border-radius:20px;margin:2px 4px 2px 0;">{_he(sec)} · {w:.2f}</span>'
+            for sec, w in exposures
+        )
+
+        st.markdown(
+            f'<div style="border:1px solid rgba(124,58,237,0.25);border-radius:12px;'
+            f'padding:16px 20px;margin-bottom:12px;background:rgba(124,58,237,0.04);">'
+            f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">'
+            f'<span style="font-size:1rem;font-weight:700;color:#F5F5F7;">🌐 {_he(m["name"])}</span>'
+            f'{score_badge}'
+            f'<span style="margin-left:auto;font-size:0.72rem;color:#6b7280;">'
+            f'{n} reading(s) · {ev_count} event(s)</span>'
+            f'</div>'
+            + (f'<div style="font-size:0.84rem;color:#A1A1A6;margin-bottom:8px;line-height:1.5;">'
+               f'{_he(m.get("description") or "")}</div>' if m.get("description") else "")
+            + (f'<div style="margin-top:6px;">{exposure_pills}</div>' if exposure_pills else "")
+            + '</div>',
             unsafe_allow_html=True,
         )
 
@@ -2178,7 +2320,9 @@ def main():
         render_simulator_tab()
         return
 
-    tab_dive, tab_compare, tab_rank, tab_brief = st.tabs(["Deep Dive", "Compare", "Rankings", "Weekly Brief"])
+    tab_dive, tab_compare, tab_rank, tab_brief, tab_macro = st.tabs(
+        ["Deep Dive", "Compare", "Rankings", "Weekly Brief", "Macro"]
+    )
 
     with tab_dive:
         if selected_id is None:
@@ -2284,6 +2428,9 @@ def main():
 
     with tab_brief:
         render_weekly_brief_tab()
+
+    with tab_macro:
+        render_macro_tab(targets)
 
 
 # ---------------------------------------------------------------------------

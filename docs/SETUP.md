@@ -52,7 +52,13 @@ REPORTS_DIR=/abs/path/        # default: reports/
 
 ## 3. Apply Supabase Migrations
 
-In the Supabase SQL Editor (or via `supabase db push`), apply all files under `supabase/migrations/` in numeric order — `000` through `015`. See [supabase/README.md](../supabase/README.md) for the full list and what each migration does.
+In the Supabase SQL Editor (or via `supabase db push`), apply all files under `supabase/migrations/` in numeric order — `000` through `018`. See [supabase/README.md](../supabase/README.md) for the full list and what each migration does.
+
+Post-migration one-time step: seed the 8 MACRO (geopolitics/regulatory) themes after `017_macro_targets.sql` is applied:
+
+```bash
+PYTHONPATH=src python scripts/seed_macro_targets.py
+```
 
 ---
 
@@ -141,7 +147,7 @@ PYTHONPATH=src python src/weekly_brief.py
 
 ### 4.8 AI Stock Simulator
 
-Persistent $1,000 virtual portfolio. Uses a five-layer quant strategy (multi-factor ranking, EV gate, signal consensus, regime filter, Markowitz + Kelly) to decide what to buy and sell daily. No real money involved.
+Persistent $1,000 virtual portfolio. Six-factor quant strategy (sentiment momentum, price momentum, inverse volatility, signal consistency, historical accuracy, macro exposure) gated by EV check, signal consensus (3/6), and regime filter, then allocated via Markowitz max-Sharpe with Kelly Criterion caps. No real money involved.
 
 **Execute pending trades** (run after `price_fetcher.py`, before `tracker.py`):
 
@@ -149,7 +155,7 @@ Persistent $1,000 virtual portfolio. Uses a five-layer quant strategy (multi-fac
 PYTHONPATH=src python src/sim_trader.py --action execute
 ```
 
-Settles any trades queued from yesterday using today's market open price. Also runs risk management: stop-loss (−8%), take-profit (+25%), sentiment stop, and max drawdown guard (−15% from peak → full liquidation).
+Processes queued SELLs first (rotation + forced exits), then settles BUYs using today's market open price. Risk rules: stop-loss (−8% from cost), trailing stop (−6% from post-entry peak, armed after +2% gain), take-profit (+25%), sentiment stop (`threat` tag or today's score < −3), max drawdown guard (−15% from peak → full liquidation + queue wipe).
 
 **Analyze and queue tomorrow's trades** (run after `tracker.py` and `price_correlator.py`):
 
@@ -158,15 +164,24 @@ PYTHONPATH=src python src/sim_trader.py --action analyze
 ```
 
 Runs the full quant pipeline on today's sentiment data:
-1. Multi-factor scoring (sentiment momentum, price momentum, volatility, signal consistency, historical accuracy) — top 20% of universe only
-2. EV gate: p_win > 55% AND expected return > 3% (from `price_reactions` history, min 5 samples)
-3. Signal consensus: 4/5 factors must be directionally aligned
-4. Regime filter: ≥50% of universe must have positive sentiment momentum (risk-off = hold cash)
-5. Markowitz max-Sharpe optimization (`scipy`) with Ledoit-Wolf covariance shrinkage
-6. Kelly Criterion position sizing (capped at 25% per position)
-7. AI generates rationale text only — does not pick stocks
+1. **Universe**: sentiment from the last 72h (`SIM_SENTIMENT_LOOKBACK_HOURS=72`) with `avg_score ≥ 3`; held positions unioned in so z-scores are comparable
+2. **Six-factor scoring**: sentiment momentum (25%), price momentum (20%), inverse volatility (15%), signal consistency (15%), historical accuracy (10%), macro exposure (15%) — Z-scored and composited
+3. **Top cohort**: top 1/3 of ranked universe (floor of 4 names)
+4. **EV gate**: `p_win ≥ 55%` AND `EV ≥ 1.5%` from `price_reactions` history (min 5 samples). **Strong-signal override**: `avg_score ≥ 7 + tag='opportunity'` bypasses the sample gate with halved position size
+5. **Signal consensus**: 3 of 6 factors must be directionally positive
+6. **Regime filter**: ≥40% positive sentiment momentum OR absolute count ≥ 3
+7. **Markowitz max-Sharpe** (scipy SLSQP, Ledoit-Wolf shrinkage)
+8. **Kelly sizing** capped at 25% per position; deploys up to 90% of cash (25% when regime is risk-off → top-1 only)
+9. **Rotation**: any held position with composite < 0 gets a SELL queued if a stronger BUY is also queued (max 2/day)
+10. AI generates rationale text only — does not pick stocks
 
-Queues BUYs in `sim_pending_trades` for tomorrow's execute step. Capital only deploys when all gates pass — cash is held by default.
+Queues BUYs (and any rotation SELLs) in `sim_pending_trades` for tomorrow's execute step.
+
+**Diagnose the funnel** (read-only; shows stage counts so you can see why a day produced no trades):
+
+```bash
+PYTHONPATH=src python src/sim_trader.py --action diagnose
+```
 
 **Fortnightly performance snapshot** (runs automatically on even-week Mondays):
 
@@ -228,6 +243,70 @@ Located in `scripts/`:
 | `deduplicate_sentiment_rows.py` | Remove exact duplicate sentiment rows |
 | `find_duplicate_targets.py` | Identify similar target names |
 | `merge_duplicate_targets.py` | Merge duplicate targets and their sentiment |
-| `link_products_to_companies.py` | Batch link products to parent companies |
+| `link_products_to_companies.py` | Batch link products to parent companies (manual dict) |
+| `ai_link_products.py` | AI-driven product→parent linking; creates missing parents if needed |
+| `seed_macro_targets.py` | Seed 8 MACRO (geopolitics/regulatory) themes + sector exposures. Run once after migration 017 |
 | `update_logo_urls.py` | Fetch logos via Clearbit / Google Favicon API |
 | `test_supabase_key.py` | Validate DB connection |
+
+---
+
+## 8. Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest                 # all tests
+pytest -v              # verbose
+pytest tests/test_sim_factors.py -k Kelly   # single test
+```
+
+Tests cover pure functions only (no Supabase/OpenAI calls required). `tests/conftest.py` sets placeholder env vars so `config.py` imports succeed without real credentials.
+
+---
+
+## 9. Docker
+
+```bash
+docker build -t psengine .
+
+# Dashboard (Streamlit)
+docker run --rm -p 8501:8501 --env-file .env psengine
+
+# Pipeline step
+docker run --rm --env-file .env psengine python src/scout.py
+docker run --rm --env-file .env psengine python src/sim_trader.py --action diagnose
+```
+
+The image is Python 3.11-slim, installs `requirements.txt` + the spacy model, and runs as a non-root user.
+
+---
+
+## 10. Observability
+
+### Logs
+
+`src/logging_setup.py` installs a root-level handler at the top of every pipeline entry point. When `GITHUB_ACTIONS=true`, output is one JSON object per line (parseable by Datadog, Loki, etc.). Locally, output is human-readable.
+
+### Pipeline telemetry
+
+`src/pipeline_telemetry.py` wraps every pipeline step (`scout`, `tracker`, `sec_scout`, `price_fetcher`, `price_correlator`, `report`, `weekly_brief`, `sim_execute`, `sim_analyze`, `sim_snapshot`, `sim_diagnose`) with a context manager that writes a row to the `pipeline_runs` table:
+
+| Column | Meaning |
+|--------|---------|
+| `step_name` | Stage name |
+| `started_at`, `ended_at`, `duration_ms` | Timing |
+| `status` | `running` / `success` / `failed` |
+| `rows_processed` | If the step calls `.rows(n)` on the context handle |
+| `error_message` | Exception repr on failure (truncated to 2000 chars) |
+| `extra` | Freeform JSONB — anything passed via `.note(**kwargs)` |
+
+Disable telemetry for ad-hoc runs: `PIPELINE_TELEMETRY=0 PYTHONPATH=src python src/scout.py`.
+
+Query recent failures:
+
+```sql
+SELECT step_name, started_at, duration_ms, error_message
+FROM pipeline_runs
+WHERE status = 'failed'
+ORDER BY started_at DESC LIMIT 20;
+```

@@ -334,9 +334,13 @@ def run_reporter() -> None:
 
 
 if __name__ == "__main__":
+    from logging_setup import setup_logging
+    from pipeline_telemetry import step
+
+    setup_logging()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     if len(sys.argv) > 1:
-        # Backfill: re-parse an existing report file and store analyses into events (no Gemini call)
+        # Backfill: re-parse an existing report file and store analyses into events (no AI call)
         path = sys.argv[1]
         if not os.path.isfile(path):
             logging.error("Report file not found: %s", path)
@@ -347,4 +351,5 @@ if __name__ == "__main__":
         n = parse_report_and_store_analyses(content)
         logging.info("✅ Stored strategic analysis for %d event(s). Refresh the dashboard.", n)
     else:
-        run_reporter()
+        with step("report"):
+            run_reporter()

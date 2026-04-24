@@ -17,7 +17,7 @@ The dashboard is a Next.js app in `web/` deployed to **Vercel**. It auto-deploys
   - `NEXT_PUBLIC_SUPABASE_URL`
   - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
 
-Use the **anon** (public) key — not the service_role key. RLS policies in migrations `006` and `016` grant read access to the anon key.
+Use the **anon** (public) key — not the service_role key. RLS policies in migrations `006` and `016` grant read access to the anon key. New tables from migrations 017 (`macro_sector_exposure`) and 018 (`pipeline_runs`) need their own RLS policies if the dashboard needs to read them with the anon key — currently they are read via the service_role key on the pipeline side and the new Macro tab in Streamlit, which uses the service key.
 
 ---
 
@@ -66,7 +66,7 @@ Set **Root Directory** to `web` in Vercel Dashboard → Project → Settings →
 
 ### 5. Apply Supabase migrations
 
-Before the dashboard loads correctly, all migrations in `supabase/migrations/` (`000` through `016`) must be applied. See [supabase/README.md](../supabase/README.md).
+Before the dashboard loads correctly, all migrations in `supabase/migrations/` (`000` through `018`) must be applied. See [supabase/README.md](../supabase/README.md). After `017_macro_targets.sql`, run `PYTHONPATH=src python scripts/seed_macro_targets.py` to seed the 8 MACRO themes used by the Macro tab and the simulator's `macro_exposure` factor.
 
 ---
 

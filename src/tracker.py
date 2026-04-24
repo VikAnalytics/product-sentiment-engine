@@ -586,5 +586,10 @@ Chatter data:
 
 
 if __name__ == "__main__":
-    _configure_logging()
-    run_tracker()
+    from logging_setup import setup_logging
+    from pipeline_telemetry import step
+
+    setup_logging()
+    _configure_logging()  # no-op: setup_logging has already installed a handler
+    with step("tracker"):
+        run_tracker()

@@ -105,8 +105,9 @@ def run_sec_scout():
 
     targets = (
         sb.table("targets")
-        .select("id, name, ticker")
+        .select("id, name, ticker, target_type")
         .eq("status", "tracking")
+        .in_("target_type", ["COMPANY", "PRODUCT"])
         .neq("ticker", "null")
         .execute()
         .data
@@ -171,4 +172,9 @@ def run_sec_scout():
 
 
 if __name__ == "__main__":
-    run_sec_scout()
+    from logging_setup import setup_logging
+    from pipeline_telemetry import step
+
+    setup_logging()
+    with step("sec_scout"):
+        run_sec_scout()

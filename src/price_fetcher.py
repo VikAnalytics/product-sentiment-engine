@@ -74,11 +74,12 @@ def _fetch_bars(ticker: str, days: int) -> list[dict]:
 def run_price_fetcher():
     sb = get_supabase()
 
-    # Load all targets that have a ticker
+    # Load tradeable targets that have a ticker (MACRO themes excluded by target_type).
     targets = (
         sb.table("targets")
-        .select("id, name, ticker")
+        .select("id, name, ticker, target_type")
         .eq("status", "tracking")
+        .in_("target_type", ["COMPANY", "PRODUCT"])
         .neq("ticker", "null")
         .execute()
         .data
@@ -121,4 +122,9 @@ def run_price_fetcher():
 
 
 if __name__ == "__main__":
-    run_price_fetcher()
+    from logging_setup import setup_logging
+    from pipeline_telemetry import step
+
+    setup_logging()
+    with step("price_fetcher"):
+        run_price_fetcher()

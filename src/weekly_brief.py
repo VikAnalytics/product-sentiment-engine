@@ -241,5 +241,10 @@ def run_weekly_brief() -> None:
 
 
 if __name__ == "__main__":
+    from logging_setup import setup_logging
+    from pipeline_telemetry import step
+
+    setup_logging()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    run_weekly_brief()
+    with step("weekly_brief"):
+        run_weekly_brief()

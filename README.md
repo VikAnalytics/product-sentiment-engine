@@ -24,10 +24,11 @@ Every insight is traceable to a specific HN thread, Reddit post, or SEC filing.
 | Signal | Source | Output |
 |--------|--------|--------|
 | News events | RSS feeds + SEC EDGAR (8-K, 10-Q, 10-K) | Structured events per company/product |
+| Geopolitics themes | Reuters World + BBC + AP + Politico EU + Al Jazeera + Foreign Policy | Sentiment on 8 MACRO themes (US-China, Russia-Ukraine, Semi export controls, OPEC, AI regulation, …) |
 | Community sentiment | Hacker News + Reddit | Pros, cons, verbatim quotes with source links |
 | Stock price reactions | yfinance 5-min OHLCV bars | Inter-event price attribution per event |
 | Structured intelligence | OpenAI `gpt-4o-mini` | Daily reports + weekly executive brief |
-| AI portfolio simulation | Five-layer quant strategy on sentiment + price data | Virtual $1,000 portfolio with daily trades |
+| AI portfolio simulation | Six-factor quant strategy on sentiment + price + macro data | Virtual $1,000 portfolio with daily trades |
 
 Surfaces through two outputs:
 
@@ -98,11 +99,15 @@ For each event (last 14 days), fetches chatter from Hacker News and Reddit concu
 
 ### 5. AI Stock Simulator
 
-Persistent $1,000 virtual portfolio. Uses a five-layer quant strategy (multi-factor ranking → EV gate → signal consensus → regime filter → Markowitz + Kelly) to decide what to buy and sell daily. Trades execute at next day's market open price. No real money.
+Persistent $1,000 virtual portfolio. Six-factor quant strategy (sentiment momentum, price momentum, inverse volatility, signal consistency, historical accuracy, macro exposure) → EV gate → 3/6 signal consensus → regime filter → Markowitz max-Sharpe → Kelly sizing. Trades execute at next day's market open. Risk-side: trailing stop (−6% from post-entry peak), fixed stop-loss (−8%), take-profit (+25%), sentiment stop (threat tag or score < −3), max drawdown guard (−15%), rotation SELL (evict held positions with negative composite when stronger BUYs queue). No real money. Run `--action diagnose` anytime to inspect the funnel.
 
 ### 6. Reports
 
 **Daily report** aggregates the last 24h of sentiment, deduplicates repeated points, and prompts OpenAI to write a professional Market Intelligence Report. **Weekly brief** (Mondays) is a 7-day strategic synthesis covering opportunities, risks, competitive shifts, and recommended actions.
+
+### 7. MACRO Themes (Geopolitics + Regulation)
+
+Eight seeded themes (US-China Trade Tensions, Russia-Ukraine Conflict, Semiconductor Export Controls, Tariffs, OPEC, AI Regulation, Middle East Tensions, Climate Policy) carry their own event/sentiment timelines. Each theme maps to affected sectors with a 0..1 exposure weight. The simulator's `macro_exposure` factor penalizes candidates whose sector has an active negative-sentiment theme. See `scripts/seed_macro_targets.py`.
 
 ---
 
@@ -127,13 +132,34 @@ Persistent $1,000 virtual portfolio. Uses a five-layer quant strategy (multi-fac
 ## Repository Structure
 
 ```
-├── src/                    Python pipeline (scout, tracker, report, simulator)
+├── src/                    Python pipeline (scout, tracker, report, simulator, telemetry, logging)
 ├── web/                    Next.js web dashboard (deployed on Vercel)
-├── supabase/migrations/    Database schema — apply in numeric order
-├── scripts/                One-off maintenance scripts (dedup, merge targets, etc.)
+├── supabase/migrations/    Database schema — apply 000 → 018 in numeric order
+├── scripts/                One-off maintenance scripts (dedup, merge, seed_macro_targets, ai_link_products)
+├── tests/                  Pytest suite covering pure functions (run: `pytest`)
 ├── reports/                Generated daily reports and weekly briefs
 ├── docs/                   Setup, deployment, and technical reference
+├── Dockerfile              Reproducible Python 3.11-slim image
+├── pytest.ini              Test runner config
+├── requirements.txt        Runtime deps
+├── requirements-dev.txt    Dev/test deps (pytest, pytest-cov)
 └── .github/workflows/      GitHub Actions: daily pipeline automation
+```
+
+## Running Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest             # 59 tests, no network / API calls required
+```
+
+## Docker (optional)
+
+```bash
+docker build -t psengine .
+docker run --rm --env-file .env -p 8501:8501 psengine   # dashboard
+docker run --rm --env-file .env psengine python src/scout.py
+docker run --rm --env-file .env psengine python src/sim_trader.py --action diagnose
 ```
 
 ---

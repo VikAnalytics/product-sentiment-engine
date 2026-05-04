@@ -291,7 +291,7 @@ def parse_report_and_store_analyses(report_content: str) -> int:
                 if not event_id and len(events_list) == 1:
                     # Single event for this target: reuse it instead of creating a duplicate
                     event_id = events_list[0]["id"]
-                elif not event_id and len(events_list) == 0:
+                elif not event_id and len(events_list) == 0 and headline and headline != "(general)":
                     ins = supabase.table("events").insert({"target_id": target_id, "headline": headline}).execute()
                     new_data = getattr(ins, "data", None) or []
                     event_id = new_data[0]["id"] if new_data else None

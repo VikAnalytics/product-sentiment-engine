@@ -11,7 +11,7 @@ export const supabase = url && key ? createClient(url, key) : createClient('http
 export interface Target {
   id: number
   name: string
-  target_type: 'COMPANY' | 'PRODUCT'
+  target_type: 'COMPANY' | 'PRODUCT' | 'MACRO'
   description: string | null
   status: string
   logo_url: string | null
@@ -95,9 +95,9 @@ export interface SimTrade {
   target_id: number | null
   ticker: string
   action: 'BUY' | 'SELL'
-  shares: number
-  price: number
-  usd_value: number
+  shares: number | null
+  price: number | null
+  usd_value: number | null
   pnl_usd: number | null
   status: 'executed' | 'skipped'
   skip_reason: string | null
@@ -146,6 +146,7 @@ export async function fetchRecentHeadlines(lookbackHours = 48): Promise<(Event &
     .from('events')
     .select('*, targets!inner(*)')
     .gte('created_at', since)
+    .neq('headline', '(general)')
     .order('created_at', { ascending: false })
     .limit(200)
   if (error) throw error
@@ -334,20 +335,21 @@ export async function fetchLatestPricesForTickers(tickers: string[]): Promise<Re
   if (tickers.length === 0) return {}
   const result: Record<string, number> = {}
   for (const ticker of tickers) {
-    const { data: targetRow } = await supabase
+    const { data: targetRows } = await supabase
       .from('targets')
       .select('id')
       .eq('ticker', ticker)
-      .single()
-    if (!targetRow) continue
-    const { data } = await supabase
+      .limit(1)
+    const targetId = targetRows?.[0]?.id
+    if (targetId == null) continue
+    const { data: priceRows } = await supabase
       .from('stock_prices')
       .select('close')
-      .eq('target_id', targetRow.id)
+      .eq('target_id', targetId)
       .order('ts', { ascending: false })
       .limit(1)
-      .single()
-    if (data) result[ticker] = data.close
+    const close = priceRows?.[0]?.close
+    if (close != null) result[ticker] = close
   }
   return result
 }

@@ -232,9 +232,9 @@ export default function Simulator() {
                   <td style={{ padding: '9px 10px', borderBottom: '1px solid var(--br)', color: 'var(--t1)', fontWeight: 700 }}>{t.trade_date}</td>
                   <td style={{ padding: '9px 10px', borderBottom: '1px solid var(--br)', color: t.action === 'BUY' ? 'var(--green)' : 'var(--red)' }}>{t.action}</td>
                   <td style={{ padding: '9px 10px', borderBottom: '1px solid var(--br)', color: 'var(--t2)' }}>{t.ticker}</td>
-                  <td style={{ padding: '9px 10px', borderBottom: '1px solid var(--br)', color: 'var(--t2)' }}>{t.shares.toFixed(4)}</td>
-                  <td style={{ padding: '9px 10px', borderBottom: '1px solid var(--br)', color: 'var(--t2)' }}>${t.price.toFixed(2)}</td>
-                  <td style={{ padding: '9px 10px', borderBottom: '1px solid var(--br)', color: 'var(--t2)' }}>{fmtUSD(t.usd_value)}</td>
+                  <td style={{ padding: '9px 10px', borderBottom: '1px solid var(--br)', color: 'var(--t2)' }}>{t.shares != null ? t.shares.toFixed(4) : '—'}</td>
+                  <td style={{ padding: '9px 10px', borderBottom: '1px solid var(--br)', color: 'var(--t2)' }}>{t.price != null ? `$${t.price.toFixed(2)}` : '—'}</td>
+                  <td style={{ padding: '9px 10px', borderBottom: '1px solid var(--br)', color: 'var(--t2)' }}>{t.usd_value != null ? fmtUSD(t.usd_value) : '—'}</td>
                   <td style={{ padding: '9px 10px', borderBottom: '1px solid var(--br)', color: t.pnl_usd == null ? 'var(--tm)' : t.pnl_usd >= 0 ? 'var(--green)' : 'var(--red)' }}>
                     {t.pnl_usd != null ? `${t.pnl_usd >= 0 ? '+' : ''}${fmtUSD(t.pnl_usd)}` : '—'}
                   </td>

@@ -39,10 +39,24 @@ export default function Simulator() {
   if (error) return <ErrorState message={error} />
   if (!portfolio) return <Empty title="Simulator not initialized" hint="Apply migration 015 in Supabase, then run the analyze step once." />
 
+  // The simulator can be restarted; earlier runs stay in the tables rather than
+  // being deleted, so everything here is scoped to the run in progress. Mixing
+  // them would draw the previous run's closing value against this one's opening.
+  const inception = portfolio?.initialized_at?.slice(0, 10) ?? ''
+  const runSnapshots = useMemo(
+    () => snapshots.filter(s => !inception || s.snapshot_date >= inception),
+    [snapshots, inception]
+  )
+  const runTrades = useMemo(
+    () => trades.filter(t => !inception || t.trade_date >= inception),
+    [trades, inception]
+  )
+  const earlierRuns = snapshots.length - runSnapshots.length > 0 || trades.length - runTrades.length > 0
+
   // Benchmarks only exist from migration 021 onward, so treat them as optional.
-  const curve = [...snapshots.map(s => s.total_value), total]
-  const spyCurve = snapshots.map(s => s.spy_value)
-  const qqqCurve = snapshots.map(s => s.qqq_value)
+  const curve = [...runSnapshots.map(s => s.total_value), total]
+  const spyCurve = runSnapshots.map(s => s.spy_value)
+  const qqqCurve = runSnapshots.map(s => s.qqq_value)
   const hasBenchmarks = spyCurve.some(v => v != null) || qqqCurve.some(v => v != null)
   const lastSpy = [...spyCurve].reverse().find(v => v != null) ?? null
   const lastQqq = [...qqqCurve].reverse().find(v => v != null) ?? null
@@ -55,7 +69,10 @@ export default function Simulator() {
         <section className="hero p-5 md:p-7 rise">
           <div className="flex flex-col md:flex-row md:items-end gap-6">
             <div className="flex-1 min-w-0">
-              <div className="text-[13px] text-ink-2">Virtual portfolio, started with {fmtUSD(SIM_START, 0)}</div>
+              <div className="text-[13px] text-ink-2">
+                Virtual portfolio, started with {fmtUSD(SIM_START, 0)}
+                {inception && <> on {fmtDate(inception, { month: 'long', day: 'numeric', year: 'numeric' })}</>}
+              </div>
               <div className="display text-[48px] md:text-[64px] font-semibold text-ink mt-1 tnum">{fmtUSD(total)}</div>
               <div className="figure text-[20px] font-semibold mt-1" style={{ color: signColor(pnl) }}>
                 {fmtSignedUSD(pnl)} <span className="text-[15px] font-medium">({fmtPct(pnlPct)})</span>
@@ -86,7 +103,7 @@ export default function Simulator() {
                 portfolioColor={signColor(pnl)}
               />
               <div className="flex justify-between text-[11.5px] text-ink-3 mt-1.5 tnum">
-                <span>{snapshots[0] ? fmtDate(snapshots[0].snapshot_date, { month: 'short', day: 'numeric', year: 'numeric' }) : ''}</span>
+                <span>{runSnapshots[0] ? fmtDate(runSnapshots[0].snapshot_date, { month: 'short', day: 'numeric', year: 'numeric' }) : ''}</span>
                 <span>{hasBenchmarks ? 'Fortnightly snapshots against the same money held in each index' : 'Fortnightly snapshots, dashed line is starting capital'}</span>
                 <span>Now</span>
               </div>
@@ -142,12 +159,17 @@ export default function Simulator() {
 
         {/* Trades */}
         <section className="mt-8">
-          <SectionHead title="Trade log" meta={trades.length ? `last ${trades.length}` : undefined} />
-          {trades.length === 0 ? <p className="text-[13.5px] text-ink-3 py-4 m-0">No trades yet.</p> : (
+          <SectionHead
+            title="Trade log"
+            meta={runTrades.length
+              ? `${runTrades.length} this run${earlierRuns ? ', earlier runs kept but not shown' : ''}`
+              : (earlierRuns ? 'nothing yet this run, earlier runs kept but not shown' : undefined)}
+          />
+          {runTrades.length === 0 ? <p className="text-[13.5px] text-ink-3 py-4 m-0">No trades yet in this run.</p> : (
             <Table
               head={['Date', 'Action', 'Ticker', 'Shares', 'Price', 'Value', 'P&L', 'Status']}
               align={['l', 'l', 'l', 'r', 'r', 'r', 'r', 'l']}
-              rows={trades.map(t => [
+              rows={runTrades.map(t => [
                 <span key="d" className="text-ink">{fmtDate(t.trade_date, { month: 'short', day: 'numeric', year: '2-digit' })}</span>,
                 <span key="a" className="font-medium" style={{ color: t.action === 'BUY' ? 'var(--pos)' : 'var(--neg)' }}>{t.action}</span>,
                 <span key="t" className="font-medium text-ink">{t.ticker}</span>,

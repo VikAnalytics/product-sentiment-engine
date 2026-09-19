@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { fetchSimData, fetchLatestPricesForTickers, SimHolding, SimPending, SimPortfolio, SimSnapshot, SimTrade } from '@/lib/supabase'
+import { fetchSimData, fetchLatestPricesForTickers, SimHolding, SimPending, SimPortfolio, SimRun, SimSnapshot, SimTrade } from '@/lib/supabase'
 import { fmtDate, fmtPct, fmtSignedUSD, fmtUSD, signColor } from '@/lib/utils'
 import { Empty, ErrorState, Icon, Loading, SectionHead } from '@/components/ui'
 
@@ -13,6 +13,7 @@ export default function Simulator() {
   const [pending, setPending] = useState<SimPending[]>([])
   const [trades, setTrades] = useState<SimTrade[]>([])
   const [snapshots, setSnapshots] = useState<SimSnapshot[]>([])
+  const [previousRuns, setPreviousRuns] = useState<SimRun[]>([])
   const [prices, setPrices] = useState<Record<string, number>>({})
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -192,6 +193,15 @@ export default function Simulator() {
           </button>
           {strategyOpen && <Strategy />}
         </section>
+
+        {previousRuns.length > 0 && (
+          <section className="mt-8 mb-6">
+            <SectionHead title="Earlier experiments" meta="kept for comparison, not counted in the figures above" />
+            <ul className="m-0 p-0 list-none">
+              {previousRuns.map(r => <PreviousRun key={r.id} run={r} />)}
+            </ul>
+          </section>
+        )}
       </div>
     </div>
   )
@@ -288,6 +298,47 @@ function GrowthChart({ portfolio, spy, qqq, baseline, portfolioColor }: {
         </div>
       )}
     </div>
+  )
+}
+
+/** One retired run: where it finished, and what the indices did over its own dates. */
+function PreviousRun({ run }: { run: SimRun }) {
+  const span = `${fmtDate(run.started_at, { month: 'short', day: 'numeric' })} to ${fmtDate(run.ended_at, { month: 'short', day: 'numeric', year: 'numeric' })}`
+  const benches = [
+    { label: 'S&P 500', value: run.spy_value },
+    { label: 'Nasdaq 100', value: run.qqq_value },
+  ].filter(b => b.value != null)
+
+  return (
+    <li className="py-4 border-b border-line last:border-0">
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <span className="text-[13px] text-ink-2 tnum">{span}</span>
+        {run.trades != null && <span className="text-[12.5px] text-ink-3">{run.trades} trades</span>}
+      </div>
+      <div className="flex flex-wrap items-end gap-x-8 gap-y-3 mt-2">
+        <div>
+          <div className="figure text-[26px] font-semibold tnum" style={{ color: signColor(run.return_pct) }}>
+            {fmtUSD(run.final_value)}
+          </div>
+          <div className="text-[12.5px] text-ink-2 mt-0.5">
+            this strategy, {fmtPct(run.return_pct / 100, 2)} from {fmtUSD(run.starting_value, 0)}
+          </div>
+        </div>
+        {benches.map(b => (
+          <div key={b.label}>
+            <div className="figure text-[20px] font-semibold text-ink-2 tnum">{fmtUSD(b.value!)}</div>
+            <div className="text-[12.5px] text-ink-3 mt-0.5">
+              {b.label}, {fmtPct((b.value! - run.starting_value) / run.starting_value, 2)}
+            </div>
+            <div className="text-[12.5px] mt-0.5" style={{ color: signColor(run.final_value - b.value!) }}>
+              {run.final_value >= b.value! ? 'ahead by ' : 'behind by '}
+              {fmtUSD(Math.abs(run.final_value - b.value!))}
+            </div>
+          </div>
+        ))}
+      </div>
+      {run.note && <p className="m-0 mt-2 text-[12.5px] text-ink-3">{run.note}</p>}
+    </li>
   )
 }
 

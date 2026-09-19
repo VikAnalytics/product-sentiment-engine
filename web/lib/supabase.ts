@@ -131,6 +131,20 @@ export interface SimSnapshot {
   qqq_value: number | null
 }
 
+/** A retired simulator run, summarised when it was reset (migration 022). */
+export interface SimRun {
+  id: number
+  started_at: string
+  ended_at: string
+  starting_value: number
+  final_value: number
+  return_pct: number
+  spy_value: number | null
+  qqq_value: number | null
+  trades: number | null
+  note: string | null
+}
+
 // ── Query helpers ────────────────────────────────────────────────────────────
 
 export async function fetchTargets(): Promise<Target[]> {
@@ -308,6 +322,7 @@ export async function fetchSimData(): Promise<{
   pending: SimPending[]
   trades: SimTrade[]
   snapshots: SimSnapshot[]
+  previousRuns: SimRun[]
 }> {
   const [
     { data: portfolio },
@@ -315,12 +330,16 @@ export async function fetchSimData(): Promise<{
     { data: pending },
     { data: trades },
     { data: snapshots },
+    { data: previousRuns },
   ] = await Promise.all([
     supabase.from('sim_portfolio').select('*').single(),
     supabase.from('sim_holdings').select('*').order('ticker'),
     supabase.from('sim_pending_trades').select('*').order('queued_at', { ascending: false }),
     supabase.from('sim_trades').select('*').order('created_at', { ascending: false }).limit(50),
     supabase.from('sim_snapshots').select('*').order('snapshot_date'),
+    // sim_runs needs migration 022; treat its absence as "no earlier runs".
+    supabase.from('sim_runs').select('*').order('ended_at', { ascending: false }).limit(5)
+      .then(r => (r.error ? { data: [] } : r), () => ({ data: [] })),
   ])
   return {
     portfolio: portfolio ?? null,
@@ -328,6 +347,7 @@ export async function fetchSimData(): Promise<{
     pending: pending ?? [],
     trades: trades ?? [],
     snapshots: snapshots ?? [],
+    previousRuns: (previousRuns as SimRun[] | null) ?? [],
   }
 }
 

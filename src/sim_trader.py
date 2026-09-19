@@ -928,7 +928,7 @@ def run_execute():
             "execute: %s is not a trading day — holding %d queued trade(s) for the next session",
             today, len(queued),
         )
-        return
+        return {"traded": False, "reason": "not_a_trading_day", "queue_held": len(queued)}
 
     portfolio = _get_portfolio(sb)
     cash = float(portfolio["cash_usd"])
@@ -1143,6 +1143,7 @@ def run_execute():
 
     sb.table("sim_pending_trades").delete().neq("id", 0).execute()
     log.info("execute: done. Cash: $%.2f", cash)
+    return {"traded": True, "pending_seen": len(pending), "cash": round(cash, 2)}
 
 
 # ── analyze ────────────────────────────────────────────────────────────────
@@ -1379,6 +1380,12 @@ def run_analyze():
                  " OVERRIDE" if ev_stats.get("override") else "")
 
     log.info("analyze: done. %s", overall_rationale[:100])
+    queued_now = sb.table("sim_pending_trades").select("id, action").execute().data or []
+    return {
+        "queued": len(queued_now),
+        "queued_buys": sum(1 for q in queued_now if q.get("action") == "BUY"),
+        "queued_sells": sum(1 for q in queued_now if q.get("action") == "SELL"),
+    }
 
 
 # ── snapshot ───────────────────────────────────────────────────────────────
@@ -1563,5 +1570,13 @@ if __name__ == "__main__":
         "diagnose": ("sim_diagnose", run_diagnose),
     }
     step_name, fn = _actions[args.action]
-    with step(step_name):
-        fn()
+    with step(step_name) as s:
+        result = fn()
+        # The sim actions return counters where they have them; diagnose and
+        # snapshot return nothing, which is fine.
+        if isinstance(result, dict):
+            s.note(**result)
+            if "queued" in result:
+                s.rows(result["queued"])
+            elif "pending_seen" in result:
+                s.rows(result["pending_seen"])

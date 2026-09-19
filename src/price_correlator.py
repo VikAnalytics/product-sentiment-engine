@@ -264,6 +264,7 @@ def run_correlator():
         total_written += written
 
     log.info("price_correlator complete. Total reactions written: %d", total_written)
+    return {"public_targets": len(targets), "reactions_written": total_written}
 
 
 if __name__ == "__main__":
@@ -271,5 +272,7 @@ if __name__ == "__main__":
     from pipeline_telemetry import step
 
     setup_logging()
-    with step("price_correlator"):
-        run_correlator()
+    with step("price_correlator") as s:
+        m = run_correlator()
+        s.rows(m["reactions_written"])
+        s.note(**m)

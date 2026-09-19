@@ -527,13 +527,20 @@ def _fetch_todays_sentiment_tags(sb, tickers: list) -> dict:
 
 def _score_candidates(candidates: list, daily_returns: dict,
                       reactions: dict, sentiment_hist: dict,
-                      macro_exposure: Optional[dict] = None) -> list:
+                      macro_exposure: Optional[dict] = None,
+                      as_of: Optional[datetime] = None) -> list:
     """
     Compute 6 raw factors for each candidate, Z-score normalize, compute composite.
     Returns ALL candidates enriched with factor scores, sorted by composite_score desc.
     No cohort cut applied — call _top_cohort() to trim.
+
+    `as_of` is the moment the decision is being made, defaulting to now. It exists
+    for replay: sentiment momentum compares a recent window against the one before
+    it, so scoring April's data against a September clock puts every reading
+    outside both windows, momentum reads zero for the whole universe, and the
+    regime filter then calls every single day risk-off.
     """
-    now = datetime.now(timezone.utc)
+    now = as_of or datetime.now(timezone.utc)
     cutoff_recent = now - timedelta(days=SENTIMENT_MOMENTUM_DAYS)
     cutoff_prior  = now - timedelta(days=SENTIMENT_MOMENTUM_DAYS * 2)
 

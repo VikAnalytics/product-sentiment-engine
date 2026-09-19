@@ -137,7 +137,7 @@ def _resolve_parent_id(supabase, parent_company_name: str) -> Optional[int]:
         return rows[0].get("id")
     # Fuzzy fallback: normalized name match
     all_companies = fetch_all_rows(
-        lambda: supabase.table("targets").select("id, name").eq("target_type", "COMPANY")
+        lambda: supabase.table("targets").select("id, name").eq("target_type", "COMPANY").order("id")
     )
     norm_parent = normalize_target_name(parent_company_name)
     for c in all_companies:
@@ -229,7 +229,7 @@ def save_target_to_db(target_type: str, name: str, description: str, parent_comp
 
         # No exact match: check normalized name to avoid "M4 iPad Air" vs "iPad Air M4" duplicates
         same_type_list = fetch_all_rows(
-            lambda: supabase.table("targets").select("id, name").eq("target_type", target_type)
+            lambda: supabase.table("targets").select("id, name").eq("target_type", target_type).order("id")
         )
         norm_new = normalize_target_name(name)
         for t in same_type_list:

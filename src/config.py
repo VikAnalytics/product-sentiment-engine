@@ -140,10 +140,16 @@ def fetch_all_rows(make_query, page_size: int = SUPABASE_PAGE_SIZE) -> list:
     Truncation is silent, which makes it read as missing data rather than an error.
 
     `make_query` is called once per page and must return a *fresh* query builder,
-    because the builder carries the range from the previous call:
+    because the builder carries the range from the previous call.
+
+    The query MUST specify a stable order. Paging an unordered query is not safe:
+    Postgres may return rows in a different order for each page request, so rows
+    can be skipped or returned twice, and the result changes between identical
+    runs. Order by the primary key unless you need something else:
 
         targets = fetch_all_rows(
-            lambda: supabase.table("targets").select("*").eq("status", "tracking")
+            lambda: supabase.table("targets").select("*")
+                    .eq("status", "tracking").order("id")
         )
     """
     rows: list = []

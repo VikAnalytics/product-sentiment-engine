@@ -59,7 +59,7 @@ def get_weekly_data() -> list:
     """
     supabase = get_supabase()
     targets = fetch_all_rows(
-        lambda: supabase.table("targets").select("*").eq("status", "tracking")
+        lambda: supabase.table("targets").select("*").eq("status", "tracking").order("id")
     )
     if not targets:
         return []

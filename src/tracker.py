@@ -372,7 +372,7 @@ def run_tracker() -> dict:
                                          "stocktwits", "yahoo_finance")},
     }
     targets = fetch_all_rows(
-        lambda: supabase.table("targets").select("*").eq("status", "tracking")
+        lambda: supabase.table("targets").select("*").eq("status", "tracking").order("id")
     )
     metrics["targets"] = len(targets)
     if not targets:

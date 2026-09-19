@@ -63,7 +63,7 @@ def get_cloud_data():
     """
     supabase = get_supabase()
     targets = fetch_all_rows(
-        lambda: supabase.table("targets").select("*").eq("status", "tracking")
+        lambda: supabase.table("targets").select("*").eq("status", "tracking").order("id")
     )
 
     if not targets:
@@ -265,7 +265,7 @@ def _save_degraded(content: str) -> str:
 
 def _build_event_lookup(supabase):
     """Build normalized (target_name, headline) -> event_id; norm_target -> [event_id]; norm_target -> target_id."""
-    targets_list = fetch_all_rows(lambda: supabase.table("targets").select("id, name"))
+    targets_list = fetch_all_rows(lambda: supabase.table("targets").select("id, name").order("id"))
     targets = {t["id"]: (t.get("name") or "").strip() for t in targets_list}
     name_to_target_id = {normalize_for_dedupe(t.get("name") or ""): t["id"] for t in targets_list if t.get("id")}
     events_resp = supabase.table("events").select("id, target_id, headline").execute()

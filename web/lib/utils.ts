@@ -130,7 +130,11 @@ export function fmtSignedUSD(val: number | null | undefined): string {
 }
 
 export function fmtDate(iso: string, opts: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric' }): string {
-  return new Date(iso).toLocaleDateString('en-US', opts)
+  // A bare YYYY-MM-DD parses as UTC midnight, which renders as the previous day
+  // anywhere west of Greenwich: a trade dated the 19th showed as the 18th.
+  // Calendar dates carry no time, so anchor them at local midday.
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(iso) ? new Date(`${iso}T12:00:00`) : new Date(iso)
+  return d.toLocaleDateString('en-US', opts)
 }
 
 export function fmtDayLong(yyyymmdd: string): string {

@@ -22,7 +22,8 @@ export default function Simulator() {
   useEffect(() => {
     fetchSimData()
       .then(async d => {
-        setPortfolio(d.portfolio); setHoldings(d.holdings); setPending(d.pending); setTrades(d.trades); setSnapshots(d.snapshots)
+        setPortfolio(d.portfolio); setHoldings(d.holdings); setPending(d.pending)
+        setTrades(d.trades); setSnapshots(d.snapshots); setPreviousRuns(d.previousRuns)
         if (d.holdings.length) setPrices(await fetchLatestPricesForTickers(d.holdings.map(h => h.ticker)))
       })
       .catch(e => setError(e.message))
@@ -30,6 +31,22 @@ export default function Simulator() {
   }, [])
 
   const holdingsValue = useMemo(() => holdings.reduce((s, h) => s + (prices[h.ticker] ?? h.avg_buy_price) * h.shares, 0), [holdings, prices])
+
+  // The simulator can be restarted; earlier runs stay in the tables rather than
+  // being deleted, so everything here is scoped to the run in progress. Mixing
+  // them would draw the previous run's closing value against this one's opening.
+  // These sit above the early returns: hooks must run in the same order on every
+  // render, and React errors out if a loading render skips them.
+  const inception = portfolio?.initialized_at?.slice(0, 10) ?? ''
+  const runSnapshots = useMemo(
+    () => snapshots.filter(s => !inception || s.snapshot_date >= inception),
+    [snapshots, inception]
+  )
+  const runTrades = useMemo(
+    () => trades.filter(t => !inception || t.trade_date >= inception),
+    [trades, inception]
+  )
+
   const cash = portfolio?.cash_usd ?? 0
   const total = cash + holdingsValue
   const pnl = total - SIM_START
@@ -40,19 +57,7 @@ export default function Simulator() {
   if (error) return <ErrorState message={error} />
   if (!portfolio) return <Empty title="Simulator not initialized" hint="Apply migration 015 in Supabase, then run the analyze step once." />
 
-  // The simulator can be restarted; earlier runs stay in the tables rather than
-  // being deleted, so everything here is scoped to the run in progress. Mixing
-  // them would draw the previous run's closing value against this one's opening.
-  const inception = portfolio?.initialized_at?.slice(0, 10) ?? ''
-  const runSnapshots = useMemo(
-    () => snapshots.filter(s => !inception || s.snapshot_date >= inception),
-    [snapshots, inception]
-  )
-  const runTrades = useMemo(
-    () => trades.filter(t => !inception || t.trade_date >= inception),
-    [trades, inception]
-  )
-  const earlierRuns = snapshots.length - runSnapshots.length > 0 || trades.length - runTrades.length > 0
+  const earlierRuns = snapshots.length > runSnapshots.length || trades.length > runTrades.length
 
   // Benchmarks only exist from migration 021 onward, so treat them as optional.
   const curve = [...runSnapshots.map(s => s.total_value), total]
@@ -303,7 +308,9 @@ function GrowthChart({ portfolio, spy, qqq, baseline, portfolioColor }: {
 
 /** One retired run: where it finished, and what the indices did over its own dates. */
 function PreviousRun({ run }: { run: SimRun }) {
-  const span = `${fmtDate(run.started_at, { month: 'short', day: 'numeric' })} to ${fmtDate(run.ended_at, { month: 'short', day: 'numeric', year: 'numeric' })}`
+  // These are calendar dates stored as timestamps at UTC midnight, so take the
+  // date part rather than letting the timezone shift them a day earlier.
+  const span = `${fmtDate(run.started_at.slice(0, 10), { month: 'short', day: 'numeric' })} to ${fmtDate(run.ended_at.slice(0, 10), { month: 'short', day: 'numeric', year: 'numeric' })}`
   const benches = [
     { label: 'S&P 500', value: run.spy_value },
     { label: 'Nasdaq 100', value: run.qqq_value },

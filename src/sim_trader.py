@@ -1512,7 +1512,11 @@ def run_reset(dry_run: bool = False) -> dict:
     closed = []
     for h in holdings:
         # A reset on a weekend has no open price, and pricing the close-out at cost
-        # would book a fake zero P&L on the run being retired.
+        # would book a fake zero P&L on the run being retired. Note the assumption:
+        # the last close is the right mark for a run reset while it is still
+        # trading. Resetting one that went dormant months earlier marks it to
+        # drift it never participated in, so measure such a run at its final
+        # active valuation instead (see scripts/record_previous_run.py).
         price = (_fetch_open_price(sb, h["target_id"], today)
                  or _latest_close(sb, h["target_id"])
                  or float(h["avg_buy_price"]))

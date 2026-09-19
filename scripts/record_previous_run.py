@@ -5,9 +5,15 @@ Resets from now on write their own sim_runs row. This exists for the run retired
 on 2026-09-19, where the reset happened before the table did, and for any case
 where a summary needs reconstructing after the fact.
 
-Defaults describe that run: it began on 2026-04-12 and finished at $1,099.12 with
-57 trades on the log. Benchmarks are computed over the same window, so the
-comparison matches what the run actually lived through.
+Defaults describe that run, measured at its last valuation while it was still
+active: it began on 2026-04-12 and stood at $1,117.31 on 2026-06-22, having
+stopped trading on 2026-06-12.
+
+That end date is deliberate. Marking the run's final HD position to the most
+recent close would value a portfolio three months after the strategy stopped
+making decisions, dragging the result down by drift it had no part in. Ending the
+run where it was last genuinely measured, with benchmarks over that same window,
+compares like with like. The figures here reproduce the stored snapshot exactly.
 
 Usage:
     PYTHONPATH=src python scripts/record_previous_run.py --dry-run
@@ -33,10 +39,10 @@ log = logging.getLogger("record_previous_run")
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--started", default="2026-04-12")
-    ap.add_argument("--ended", default="2026-09-19")
-    ap.add_argument("--final", type=float, default=1099.12)
+    ap.add_argument("--ended", default="2026-06-22")
+    ap.add_argument("--final", type=float, default=1117.31)
     ap.add_argument("--trades", type=int, default=57)
-    ap.add_argument("--note", default="closed 1 open position (HD) at reset")
+    ap.add_argument("--note", default="last valuation while active; stopped trading 2026-06-12, reset 2026-09-19")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")

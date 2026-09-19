@@ -1531,6 +1531,14 @@ def run_reset(dry_run: bool = False) -> dict:
         log.info("  SELL %-6s %.4f sh @ $%.2f = $%.2f (P&L $%+.2f)",
                  c["ticker"], c["shares"], c["price"], c["proceeds"], c["pnl"])
 
+    started = _inception_date(sb, portfolio)
+    benchmarks = _benchmark_values(started, today, SIM_STARTING_CAPITAL)
+    trade_count = len(sb.table("sim_trades").select("id").execute().data or [])
+    for label, val in benchmarks.items():
+        if val is not None:
+            log.info("  %s over the same window: $%.2f (run %+.2f vs it)",
+                     label.replace("_value", "").upper(), val, old_total - val)
+
     if dry_run:
         log.info("reset: dry run — nothing written")
         return {"dry_run": True, "positions_closed": len(closed),
@@ -1555,6 +1563,26 @@ def run_reset(dry_run: bool = False) -> dict:
         sb.table("sim_pending_trades").delete().neq("id", 0).execute()
 
     now_iso = datetime.now(timezone.utc).isoformat()
+
+    # Record where the run being retired actually finished. Its last fortnightly
+    # snapshot can be weeks earlier, so without this the previous run's ending is
+    # simply unknown once the portfolio row is overwritten.
+    try:
+        sb.table("sim_runs").insert({
+            "started_at": datetime.combine(started, datetime.min.time(), timezone.utc).isoformat(),
+            "ended_at": now_iso,
+            "starting_value": SIM_STARTING_CAPITAL,
+            "final_value": old_total,
+            "return_pct": round((old_total - SIM_STARTING_CAPITAL) / SIM_STARTING_CAPITAL * 100, 4),
+            "trades": trade_count,
+            "note": f"closed {len(closed)} open position(s) at reset",
+            **benchmarks,
+        }).execute()
+    except Exception as exc:
+        # Needs migration 022. Losing the reset over a summary row would be a poor
+        # trade, so carry on and say so.
+        log.warning("reset: could not record the run summary (%s) — apply migration 022", exc)
+
     sb.table("sim_portfolio").update({
         "cash_usd": SIM_STARTING_CAPITAL,
         "peak_value": SIM_STARTING_CAPITAL,

@@ -44,7 +44,7 @@ web/
 │   ├── DeepDive.tsx        Company hero, sentiment + price sparklines, expandable event rows
 │   ├── Compare.tsx         Up to four companies side by side
 │   ├── Macro.tsx           Macro themes with 7-day score, sector exposure bars, latest headlines
-│   ├── Simulator.tsx       Portfolio hero + growth line, queue, holdings, trade log, strategy explainer
+│   ├── Simulator.tsx       Portfolio hero + growth chart vs SPY/QQQ, queue, holdings, trade log, strategy
 │   ├── Brief.tsx           Weekly and daily reports rendered from public/reports (react-markdown)
 │   ├── ui.tsx              Score, TagChip, Chip, SectionHead, Segmented, Sparkline, states, icons
 │   ├── Select.tsx          Styled native select

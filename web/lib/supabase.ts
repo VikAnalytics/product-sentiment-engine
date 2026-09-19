@@ -126,6 +126,9 @@ export interface SimSnapshot {
   pnl_pct: number
   summary_text: string | null
   created_at: string
+  /** What the starting capital would be worth in this index from inception. Null before migration 021. */
+  spy_value: number | null
+  qqq_value: number | null
 }
 
 // ── Query helpers ────────────────────────────────────────────────────────────

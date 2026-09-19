@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { fetchSimData, fetchLatestPricesForTickers, SimHolding, SimPending, SimPortfolio, SimSnapshot, SimTrade } from '@/lib/supabase'
 import { fmtDate, fmtPct, fmtSignedUSD, fmtUSD, signColor } from '@/lib/utils'
-import { Empty, ErrorState, Icon, Loading, SectionHead, Sparkline } from '@/components/ui'
+import { Empty, ErrorState, Icon, Loading, SectionHead } from '@/components/ui'
 
 const SIM_START = 1000
 
@@ -39,7 +39,13 @@ export default function Simulator() {
   if (error) return <ErrorState message={error} />
   if (!portfolio) return <Empty title="Simulator not initialized" hint="Apply migration 015 in Supabase, then run the analyze step once." />
 
+  // Benchmarks only exist from migration 021 onward, so treat them as optional.
   const curve = [...snapshots.map(s => s.total_value), total]
+  const spyCurve = snapshots.map(s => s.spy_value)
+  const qqqCurve = snapshots.map(s => s.qqq_value)
+  const hasBenchmarks = spyCurve.some(v => v != null) || qqqCurve.some(v => v != null)
+  const lastSpy = [...spyCurve].reverse().find(v => v != null) ?? null
+  const lastQqq = [...qqqCurve].reverse().find(v => v != null) ?? null
 
   return (
     <div className="flex-1 min-h-0 overflow-y-auto">
@@ -55,6 +61,14 @@ export default function Simulator() {
                 {fmtSignedUSD(pnl)} <span className="text-[15px] font-medium">({fmtPct(pnlPct)})</span>
                 <span className="text-[13px] font-normal text-ink-2 ml-2">since inception</span>
               </div>
+              {/* A return shown on its own always looks like a win. What matters is
+                  whether it beat simply holding the market it trades in. */}
+              {hasBenchmarks && (
+                <div className="flex flex-wrap gap-x-5 gap-y-1 mt-2 text-[13px]">
+                  <Versus label="S&P 500" mine={total} theirs={lastSpy} />
+                  <Versus label="Nasdaq 100" mine={total} theirs={lastQqq} />
+                </div>
+              )}
             </div>
             <dl className="grid grid-cols-3 gap-6 md:gap-8 m-0">
               <Stat label="Cash" value={fmtUSD(cash)} />
@@ -64,10 +78,16 @@ export default function Simulator() {
           </div>
           {curve.length > 1 && (
             <div className="mt-6">
-              <Sparkline points={curve} color={signColor(pnl)} baseline={SIM_START} height={110} />
+              <GrowthChart
+                portfolio={curve}
+                spy={spyCurve}
+                qqq={qqqCurve}
+                baseline={SIM_START}
+                portfolioColor={signColor(pnl)}
+              />
               <div className="flex justify-between text-[11.5px] text-ink-3 mt-1.5 tnum">
                 <span>{snapshots[0] ? fmtDate(snapshots[0].snapshot_date, { month: 'short', day: 'numeric', year: 'numeric' }) : ''}</span>
-                <span>Fortnightly snapshots, dashed line is starting capital</span>
+                <span>{hasBenchmarks ? 'Fortnightly snapshots against the same money held in each index' : 'Fortnightly snapshots, dashed line is starting capital'}</span>
                 <span>Now</span>
               </div>
             </div>
@@ -151,6 +171,100 @@ export default function Simulator() {
           {strategyOpen && <Strategy />}
         </section>
       </div>
+    </div>
+  )
+}
+
+/** Portfolio versus one index, stated as the gap rather than two numbers to subtract. */
+function Versus({ label, mine, theirs }: { label: string; mine: number; theirs: number | null }) {
+  if (theirs == null) return null
+  const gap = mine - theirs
+  const ahead = gap >= 0
+  return (
+    <span className="inline-flex items-baseline gap-1.5">
+      <span className="text-ink-2">vs {label}</span>
+      <span className="tnum font-semibold" style={{ color: ahead ? 'var(--pos)' : 'var(--neg)' }}>
+        {ahead ? '+' : '−'}{fmtUSD(Math.abs(gap))}
+      </span>
+      <span className="text-ink-3 tnum">({fmtPct(gap / theirs, 1)})</span>
+    </span>
+  )
+}
+
+const BENCH_SPY = 'var(--ink-3)'
+const BENCH_QQQ = 'var(--accent)'
+
+/**
+ * Portfolio and benchmarks on one shared scale.
+ *
+ * Deliberately one chart rather than three: the question is not how the
+ * portfolio moved but whether it moved better than the money would have done
+ * sitting in an index, and separate charts make that comparison by eye.
+ */
+function GrowthChart({ portfolio, spy, qqq, baseline, portfolioColor }: {
+  portfolio: number[]
+  spy: (number | null)[]
+  qqq: (number | null)[]
+  baseline: number
+  portfolioColor: string
+}) {
+  const W = 800, H = 130, pad = 8
+  const series = [
+    { name: 'Portfolio', values: portfolio, color: portfolioColor, width: 2.5 },
+    { name: 'S&P 500', values: spy, color: BENCH_SPY, width: 1.5 },
+    { name: 'Nasdaq 100', values: qqq, color: BENCH_QQQ, width: 1.5 },
+  ].filter(s => s.values.some(v => v != null))
+
+  const all = series.flatMap(s => s.values).filter((v): v is number => v != null).concat(baseline)
+  const min = Math.min(...all), max = Math.max(...all)
+  const span = max - min || 1
+  // Benchmarks have one point per snapshot; the portfolio adds a final live point,
+  // so index against the longest series to keep the x-axis aligned.
+  const steps = Math.max(...series.map(s => s.values.length)) - 1 || 1
+  const x = (i: number) => (i / steps) * W
+  const y = (v: number) => pad + (H - pad * 2) * (1 - (v - min) / span)
+
+  const path = (values: (number | null)[]) => {
+    let started = false
+    return values.reduce<string>((d, v, i) => {
+      if (v == null) return d
+      const cmd = started ? 'L' : 'M'
+      started = true
+      return `${d}${cmd}${x(i).toFixed(1)},${y(v).toFixed(1)} `
+    }, '').trim()
+  }
+
+  return (
+    <div>
+      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="block w-full" style={{ height: H }} aria-hidden>
+        <line x1="0" x2={W} y1={y(baseline)} y2={y(baseline)} stroke="var(--ink-3)" strokeOpacity="0.5" strokeWidth="1" strokeDasharray="3 4" vectorEffect="non-scaling-stroke" />
+        {series.map(s => (
+          <path
+            key={s.name}
+            d={path(s.values)}
+            pathLength={1}
+            fill="none"
+            stroke={s.color}
+            strokeWidth={s.width}
+            strokeLinejoin="round"
+            strokeLinecap="round"
+            strokeDasharray={s.name === 'Portfolio' ? undefined : '1'}
+            vectorEffect="non-scaling-stroke"
+            className={s.name === 'Portfolio' ? 'draw' : 'fade'}
+            style={s.name === 'Portfolio' ? ({ ['--len' as string]: '1' }) : { opacity: 0.75 }}
+          />
+        ))}
+      </svg>
+      {series.length > 1 && (
+        <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-[12px] text-ink-2">
+          {series.map(s => (
+            <span key={s.name} className="inline-flex items-center gap-1.5">
+              <span className="inline-block w-3 h-0.5 rounded-full" style={{ background: s.color }} />
+              {s.name}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

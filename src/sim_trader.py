@@ -210,7 +210,7 @@ def _fetch_first_buy_date(sb, ticker: str) -> Optional[date]:
 
 
 def _get_portfolio(sb) -> dict:
-    resp = sb.table("sim_portfolio").select("id, cash_usd, peak_value").limit(1).execute()
+    resp = sb.table("sim_portfolio").select("id, cash_usd, peak_value, initialized_at").limit(1).execute()
     rows = resp.data or []
     if not rows:
         raise RuntimeError("sim_portfolio empty — apply migration 015_simulator.sql first")
@@ -1475,6 +1475,100 @@ def _benchmark_values(inception: date, on: date, capital: float) -> dict:
     return out
 
 
+def _latest_close(sb, target_id: int) -> Optional[float]:
+    """Most recent close for a target, whenever it last traded."""
+    try:
+        resp = (
+            sb.table("stock_prices").select("close")
+            .eq("target_id", target_id).order("ts", desc=True).limit(1).execute()
+        )
+        rows = resp.data or []
+        return float(rows[0]["close"]) if rows and rows[0].get("close") is not None else None
+    except Exception as exc:
+        log.error("_latest_close(%s): %s", target_id, exc)
+        return None
+
+
+def run_reset(dry_run: bool = False) -> dict:
+    """
+    Begin a fresh run from today, keeping the record of the previous one.
+
+    Nothing is deleted from sim_trades or sim_snapshots. Open positions are closed
+    into the trade log rather than dropped, so the history stays coherent: a
+    position that simply disappeared would leave a buy with no matching sell and
+    quietly overstate past performance.
+
+    After this, cash and peak are back to the starting capital and initialized_at
+    is today, which also rebases the SPY and QQQ comparison, since benchmarks are
+    measured from inception.
+    """
+    sb = get_supabase()
+    today = date.today()
+    portfolio = _get_portfolio(sb)
+    holdings = _get_all_holdings(sb)
+    pending = sb.table("sim_pending_trades").select("id").execute().data or []
+
+    cash_before = float(portfolio["cash_usd"])
+    closed = []
+    for h in holdings:
+        # A reset on a weekend has no open price, and pricing the close-out at cost
+        # would book a fake zero P&L on the run being retired.
+        price = (_fetch_open_price(sb, h["target_id"], today)
+                 or _latest_close(sb, h["target_id"])
+                 or float(h["avg_buy_price"]))
+        shares, cost = float(h["shares"]), float(h["total_cost"])
+        proceeds = round(shares * price, 2)
+        closed.append({
+            "ticker": h["ticker"], "target_id": h["target_id"], "shares": shares,
+            "price": round(price, 4), "proceeds": proceeds, "pnl": round(proceeds - cost, 2),
+        })
+
+    old_total = round(cash_before + sum(c["proceeds"] for c in closed), 2)
+    log.info("reset: closing %d position(s); previous run ended at $%.2f (%+.2f%%)",
+             len(closed), old_total,
+             (old_total - SIM_STARTING_CAPITAL) / SIM_STARTING_CAPITAL * 100)
+    for c in closed:
+        log.info("  SELL %-6s %.4f sh @ $%.2f = $%.2f (P&L $%+.2f)",
+                 c["ticker"], c["shares"], c["price"], c["proceeds"], c["pnl"])
+
+    if dry_run:
+        log.info("reset: dry run — nothing written")
+        return {"dry_run": True, "positions_closed": len(closed),
+                "pending_cleared": len(pending), "previous_total": old_total}
+
+    for c in closed:
+        sb.table("sim_trades").insert({
+            "trade_date": today.isoformat(),
+            "target_id": c["target_id"],
+            "ticker": c["ticker"],
+            "action": "SELL",
+            "shares": c["shares"],
+            "price": c["price"],
+            "usd_value": c["proceeds"],
+            "pnl_usd": c["pnl"],
+            "status": "executed",
+            "ai_rationale": "FORCED: run reset — closing position to start a fresh run",
+        }).execute()
+        sb.table("sim_holdings").delete().eq("ticker", c["ticker"]).execute()
+
+    if pending:
+        sb.table("sim_pending_trades").delete().neq("id", 0).execute()
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    sb.table("sim_portfolio").update({
+        "cash_usd": SIM_STARTING_CAPITAL,
+        "peak_value": SIM_STARTING_CAPITAL,
+        "initialized_at": now_iso,
+        "updated_at": now_iso,
+    }).eq("id", portfolio["id"]).execute()
+
+    log.info("reset: new run starts %s with $%.2f cash, no positions. "
+             "%d trade(s) and every snapshot kept.",
+             today, SIM_STARTING_CAPITAL, len(closed))
+    return {"positions_closed": len(closed), "pending_cleared": len(pending),
+            "previous_total": old_total, "restarted_at": now_iso}
+
+
 def run_snapshot():
     """Compute and store a fortnightly performance snapshot (idempotent)."""
     sb = get_supabase()
@@ -1661,7 +1755,11 @@ if __name__ == "__main__":
     setup_logging()
 
     parser = argparse.ArgumentParser(description="Quantitative AI stock simulation trader")
-    parser.add_argument("--action", choices=["execute", "analyze", "snapshot", "diagnose"], required=True)
+    parser.add_argument("--action",
+                        choices=["execute", "analyze", "snapshot", "diagnose", "reset"],
+                        required=True)
+    parser.add_argument("--dry-run", action="store_true",
+                        help="reset only: report what would change and write nothing")
     args = parser.parse_args()
 
     _actions = {
@@ -1669,10 +1767,11 @@ if __name__ == "__main__":
         "analyze":  ("sim_analyze",  run_analyze),
         "snapshot": ("sim_snapshot", run_snapshot),
         "diagnose": ("sim_diagnose", run_diagnose),
+        "reset":    ("sim_reset",    run_reset),
     }
     step_name, fn = _actions[args.action]
     with step(step_name) as s:
-        result = fn()
+        result = fn(dry_run=args.dry_run) if args.action == "reset" else fn()
         # The sim actions return counters where they have them; diagnose and
         # snapshot return nothing, which is fine.
         if isinstance(result, dict):

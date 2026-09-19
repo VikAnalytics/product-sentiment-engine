@@ -40,6 +40,7 @@ if _src_dir not in sys.path:
     sys.path.insert(0, _src_dir)
 
 from config import (
+    SIM_BENCHMARKS,
     get_supabase,
     get_json_model,
     SIM_STARTING_CAPITAL,
@@ -1158,6 +1159,7 @@ def run_analyze():
     portfolio = _get_portfolio(sb)
     cash = float(portfolio["cash_usd"])
     holdings = _get_all_holdings(sb)
+    funnel = {"cash": round(cash, 2), "held": len(holdings)}
 
     log.info("analyze: cash=$%.2f, open_positions=%d", cash, len(holdings))
 
@@ -1220,10 +1222,14 @@ def run_analyze():
         })
 
     log.info("analyze: %d raw candidates after sentiment filter", len(candidates_raw))
+    # The funnel is recorded on every exit path. Knowing the run queued nothing is
+    # useless; knowing which gate emptied it is the whole diagnosis. diagnose has
+    # always printed this and then thrown it away.
+    funnel["candidates_raw"] = len(candidates_raw)
     if not candidates_raw:
         log.info("analyze: no candidates — holding cash")
         sb.table("sim_pending_trades").delete().neq("id", 0).execute()
-        return
+        return {**funnel, "queued": 0, "stopped_at": "sentiment_filter"}
 
     # ── Union held tickers into universe so they share a z-score basis ──
     held_ids = {h["target_id"] for h in holdings}
@@ -1267,6 +1273,9 @@ def run_analyze():
     held_scored = [c for c in scored_all if c["target_id"] in held_ids]
     top_new = _top_cohort(new_scored)
     log.info("analyze: top cohort = %d / %d new candidates", len(top_new), len(new_scored))
+    funnel["scored"] = len(scored_all)
+    funnel["new_candidates"] = len(new_scored)
+    funnel["top_cohort"] = len(top_new)
 
     # ── Regime check on full scored universe ──
     regime_ok = _check_regime(scored_all)
@@ -1274,10 +1283,13 @@ def run_analyze():
     # ── Layer 2: EV Gate ──
     ev_passed = _apply_ev_gate(top_new, reactions)
     log.info("analyze: %d candidates after EV gate", len(ev_passed))
+    funnel["regime_ok"] = bool(regime_ok)
+    funnel["ev_passed"] = len(ev_passed)
 
     # ── Layer 3: Signal Consensus ──
     final_candidates = _apply_signal_consensus(ev_passed)
     log.info("analyze: %d candidates after signal consensus", len(final_candidates))
+    funnel["consensus_passed"] = len(final_candidates)
 
     # Cap to remaining position slots
     slots = max(0, SIM_MAX_POSITIONS - len(holdings))
@@ -1295,13 +1307,15 @@ def run_analyze():
                      RISK_OFF_DEPLOY_FRAC * 100)
         else:
             log.info("analyze: RISK-OFF and nothing cleared gates — holding cash")
+            funnel["stopped_at"] = "risk_off_no_candidates"
             sb.table("sim_pending_trades").delete().neq("id", 0).execute()
-            return
+            return {**funnel, "queued": 0}
 
     if not final_candidates:
         log.info("analyze: no candidates cleared all gates — holding cash")
+        funnel["stopped_at"] = "gates"
         sb.table("sim_pending_trades").delete().neq("id", 0).execute()
-        return
+        return {**funnel, "queued": 0}
 
     # ── Layer 4: Markowitz ──
     final_tids = [c["target_id"] for c in final_candidates]
@@ -1313,11 +1327,13 @@ def run_analyze():
     # ── Layer 5: Kelly sizing (with risk-off deploy multiplier) ──
     allocations = _kelly_size(final_candidates, markowitz_weights, cash, deploy_multiplier)
     log.info("analyze: %d allocations from Kelly sizing", len(allocations))
+    funnel["allocations"] = len(allocations)
 
     if not allocations:
         log.info("analyze: Kelly sizing returned no allocations — holding cash")
+        funnel["stopped_at"] = "kelly_sizing"
         sb.table("sim_pending_trades").delete().neq("id", 0).execute()
-        return
+        return {**funnel, "queued": 0}
 
     # ── Rotation: if we have new BUYs, evict held positions with composite < 0 ──
     rotation_sells = []
@@ -1382,6 +1398,8 @@ def run_analyze():
     log.info("analyze: done. %s", overall_rationale[:100])
     queued_now = sb.table("sim_pending_trades").select("id, action").execute().data or []
     return {
+        **funnel,
+        "stopped_at": None,
         "queued": len(queued_now),
         "queued_buys": sum(1 for q in queued_now if q.get("action") == "BUY"),
         "queued_sells": sum(1 for q in queued_now if q.get("action") == "SELL"),
@@ -1389,6 +1407,66 @@ def run_analyze():
 
 
 # ── snapshot ───────────────────────────────────────────────────────────────
+
+def _inception_date(sb, portfolio: dict) -> date:
+    """When the simulator started trading: the portfolio row, else the first snapshot."""
+    raw = (portfolio or {}).get("initialized_at")
+    if raw:
+        try:
+            return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).date()
+        except ValueError:
+            pass
+    first = (
+        sb.table("sim_snapshots").select("snapshot_date")
+        .order("snapshot_date").limit(1).execute().data or []
+    )
+    if first:
+        return date.fromisoformat(first[0]["snapshot_date"])
+    return date.today()
+
+
+def _benchmark_values(inception: date, on: date, capital: float) -> dict:
+    """
+    What `capital` invested in each benchmark at `inception` would be worth on `on`.
+
+    Returns {"spy_value": float|None, "qqq_value": float|None}. The simulator's own
+    return means little on its own: it showed +9.9% over a window in which SPY
+    returned +11.6% and QQQ +17.0%, which is underperformance wearing a green
+    number. Failures return None rather than raising, since a missing benchmark
+    must never cost us the snapshot itself.
+    """
+    out: dict = {}
+    try:
+        import yfinance as yf
+    except Exception as exc:
+        log.warning("benchmark: yfinance unavailable (%s)", exc)
+        return {f"{sym.lower()}_value": None for sym in SIM_BENCHMARKS}
+
+    for symbol in SIM_BENCHMARKS:
+        key = f"{symbol.lower()}_value"
+        try:
+            # Pad the start: inception may be a weekend or holiday with no close.
+            hist = yf.Ticker(symbol).history(
+                start=(inception - timedelta(days=7)).isoformat(),
+                end=(on + timedelta(days=1)).isoformat(),
+            )
+            if hist is None or hist.empty:
+                out[key] = None
+                continue
+            closes = hist["Close"].dropna()
+            # The window is padded backwards so a weekend or holiday inception still
+            # has data, but the baseline must be the first session ON OR AFTER
+            # inception. Taking the first row of the padded window would price the
+            # benchmark a week early and understate it.
+            on_or_after = closes[[d.date() >= inception for d in closes.index]]
+            baseline = on_or_after if not on_or_after.empty else closes
+            first, last = float(baseline.iloc[0]), float(closes.iloc[-1])
+            out[key] = round(capital * last / first, 2) if first else None
+        except Exception as exc:
+            log.warning("benchmark: %s lookup failed (%s)", symbol, exc)
+            out[key] = None
+    return out
+
 
 def run_snapshot():
     """Compute and store a fortnightly performance snapshot (idempotent)."""
@@ -1436,7 +1514,15 @@ def run_snapshot():
     if losers:
         summary_parts.append("Losers: " + ", ".join(losers[:3]))
 
-    sb.table("sim_snapshots").insert({
+    inception = _inception_date(sb, portfolio)
+    benchmarks = _benchmark_values(inception, today, SIM_STARTING_CAPITAL)
+    for sym, val in benchmarks.items():
+        if val is not None:
+            delta = total_value - val
+            log.info("snapshot: %s would be $%.2f — simulator is %+.2f vs it",
+                     sym.replace("_value", "").upper(), val, delta)
+
+    row = {
         "snapshot_date": today.isoformat(),
         "cash_usd": cash,
         "holdings_value": round(total_holdings_value, 2),
@@ -1444,7 +1530,15 @@ def run_snapshot():
         "pnl_usd": pnl_usd,
         "pnl_pct": pnl_pct,
         "summary_text": " | ".join(summary_parts),
-    }).execute()
+    }
+    try:
+        sb.table("sim_snapshots").insert({**row, **benchmarks}).execute()
+    except Exception as exc:
+        # The benchmark columns need migration 021. Losing the snapshot because a
+        # nice-to-have column is missing would be a poor trade, so fall back to the
+        # original shape and let backfill_sim_benchmarks.py fill it in later.
+        log.warning("snapshot: benchmark columns unavailable (%s) — saving without them", exc)
+        sb.table("sim_snapshots").insert(row).execute()
 
     log.info("snapshot: %s — total=$%.2f P&L=$%+.2f (%+.2f%%)", today, total_value, pnl_usd, pnl_pct)
 
@@ -1580,3 +1674,11 @@ if __name__ == "__main__":
                 s.rows(result["queued"])
             elif "pending_seen" in result:
                 s.rows(result["pending_seen"])
+
+            # Idle capital is the simulator's biggest drag: it held ~92% cash from
+            # 2026-06-12 onward while the market rose. A run that queues nothing is
+            # normal; many in a row is not, and stopped_at says which gate did it.
+            if result.get("stopped_at"):
+                s.degrade(f"queued nothing, stopped at: {result['stopped_at']}")
+            if result.get("reason") == "not_a_trading_day":
+                s.note(skipped_non_trading_day=True)

@@ -205,6 +205,7 @@ REPORT_EVENT_MAX_AGE_DAYS = 3  # Only include events created within last 3 days 
 | `update_logo_urls.py` | Fetch logos via Clearbit / Google Favicon API |
 | `seed_macro_targets.py` | Seed 8 MACRO themes + sector exposure rows (idempotent; run after migration 017) |
 | `backfill_tickers.py` | Resolve missing company tickers via OpenAI, verified against yfinance name + price history. `--dry-run` / `--limit N` |
+| `backfill_sim_benchmarks.py` | Fill SPY/QQQ values onto existing `sim_snapshots` rows (needs migration 021). `--dry-run` / `--force` |
 | `test_supabase_key.py` | Validate DB connection |
 
 ---
@@ -486,5 +487,7 @@ US-China Trade Tensions · Russia-Ukraine Conflict · Middle East Tensions · Se
 - **Outbound User-Agent**: many public endpoints reject the default `python-requests` / feedparser agent without raising — they just return nothing. StockTwits, sec.gov, ftc.gov and fda.gov all did. Use `HTTP_USER_AGENT` from `config.py` for new fetchers, and `scout._agent_for()` for feeds (the SEC wants a contact address in the agent string).
 - **RSS feeds rot silently**: a dead feed returns an empty entry list, not an error. 9 of 25 were dead before 2026-09-19, including both wire services. Reuters and AP retired public RSS, so both are reached through site-scoped Google News queries. Scout records `silent_feeds` in telemetry and degrades when under 75% of feeds return entries.
 - **Reports are never published degraded**: if the AI call fails after 3 attempts, `report.py` and `weekly_brief.py` write `UNPUBLISHED_raw_summary_*.md` / `UNPUBLISHED_raw_weekly_*.md` instead of the normal filename, so the dashboard keeps showing the last real report. 7 of 65 published reports had been placeholders, including the newest weekly brief.
+- **Judge the simulator against a benchmark, never alone**: `sim_snapshots.spy_value` / `qqq_value` (migration 021) hold what the starting capital would be worth in each index from inception, so they plot directly against `total_value`. QQQ is the fair comparison because the tracked universe skews tech. Over Apr–Sep 2026 the simulator returned +9.9% against SPY +11.6% and QQQ +17.0%, and 80% of its profit came from a single DELL trade.
+- **The analyze funnel is recorded, not just printed**: `run_analyze` returns the stage counts and a `stopped_at` naming the gate that emptied the run, and the step degrades when it queues nothing. Idle capital is the simulator's largest drag — it sat ~92% cash from 2026-06-12 onward.
 - **Telemetry measures output, not just survival**: every step returns a metrics dict; the call site passes it to `s.rows()` / `s.note()` and calls `s.check(condition, reason)` to mark a run `degraded`. Needs migration 020 for the status value; without it the helper falls back to `success` carrying the reason. All 601 runs before this recorded `success` while sources were dead.
 - **Telemetry is best-effort**: never wrap the telemetry call site in additional `try/except` — the helper already swallows all exceptions internally. Let it fail silently if the table is missing.

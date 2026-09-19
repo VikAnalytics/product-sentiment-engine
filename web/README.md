@@ -34,46 +34,50 @@ Use the **anon** key (not service_role). Get both from Supabase → Project Sett
 ```
 web/
 ├── app/
-│   ├── layout.tsx          Root layout — fonts, globals, dynamic export
-│   ├── page.tsx            Entry point — view state, sidebar + main area
-│   └── globals.css         CSS variables, grain texture, keyframes, utilities
+│   ├── layout.tsx          Root layout — next/font (Bricolage Grotesque, DM Sans), theme init script
+│   ├── page.tsx            Shell — view state synced to URL hash (#companies/123), loads targets + scores
+│   └── globals.css         Tailwind v4 tokens (@theme inline), light/dark palettes, motion, brief prose styles
 ├── components/
-│   ├── TopBar.tsx          48px header — clock, title, live indicator
-│   ├── Sidebar.tsx         Nav (News Feed / Analysis / Simulator), sector filter, company list
-│   ├── NewsFeed.tsx        Chronological headline feed with score + tag badges
-│   ├── Analysis.tsx        Deep Dive / Compare / Rankings tabs
-│   ├── Simulator.tsx       Portfolio summary, positions, trade log, growth chart
-│   └── Logo.tsx            Company logo with fallback: logo_url → favicon → initials
+│   ├── TopBar.tsx          Brand, primary nav, ⌘K search palette, theme toggle, live dot
+│   ├── Feed.tsx            Mood panel (ambient gradient = today's sentiment) + company / macro columns
+│   ├── Companies.tsx       Ranked rail (search, sector, F500, sort, compare picker) + main pane
+│   ├── DeepDive.tsx        Company hero, sentiment + price sparklines, expandable event rows
+│   ├── Compare.tsx         Up to four companies side by side
+│   ├── Macro.tsx           Macro themes with 7-day score, sector exposure bars, latest headlines
+│   ├── Simulator.tsx       Portfolio hero + growth line, queue, holdings, trade log, strategy explainer
+│   ├── Brief.tsx           Weekly and daily reports rendered from public/reports (react-markdown)
+│   ├── ui.tsx              Score, TagChip, Chip, SectionHead, Segmented, Sparkline, states, icons
+│   ├── Select.tsx          Styled native select
+│   └── Logo.tsx            Company mark with fallback: logo_url → favicon → initials
 ├── lib/
-│   ├── supabase.ts         Supabase client + all DB query helpers + TypeScript types
-│   └── utils.ts            Score color classes, tag labels, formatters (USD, %, relative time)
-└── public/                 Static assets
+│   ├── supabase.ts         Supabase client + query helpers + TypeScript types
+│   ├── utils.ts            Score bands, tone colors, mood gradient, formatters
+│   └── theme.ts            useTheme(): reads/writes <html data-theme>, persists to localStorage
+├── scripts/
+│   └── sync-reports.mjs    predev/prebuild: copies ../reports/*.md → public/reports + index.json
+└── public/                 Static assets (public/reports is generated, git-ignored)
 ```
 
 ---
 
 ## Design System
 
-Dark theme. CSS variables defined in `globals.css`:
+Light and dark, toggled in the top bar (persisted per browser, follows system by default). Tokens live in `globals.css` and are exposed to Tailwind through `@theme inline`, so `bg-surface`, `text-ink-2`, `border-line` etc. resolve per theme.
 
-| Variable | Use |
-|----------|-----|
-| `--bg` | Page background (`#0a0a08`) |
-| `--gold` | Primary accent (headlines, icons) |
-| `--green` / `--red` / `--amber` | Sentiment colors |
-| `--ff-d` | Display font (Cormorant Garamond) |
-| `--ff-m` | Monospace font (Space Mono) |
-| `--ff-b` | Body font (Crimson Pro) |
+| Token | Light | Dark | Use |
+|-------|-------|------|-----|
+| `--bg` | `#EEEFF1` | `#141519` | Page ground |
+| `--surface` | `#FFFFFF` | `#1D1E24` | Hero panels, cards |
+| `--ink` / `--ink-2` / `--ink-3` | `#17181C` / `#5B5E6B` / `#8E919D` | `#EEEFF3` / `#A3A6B3` / `#6E717E` | Text hierarchy |
+| `--accent` | `#5646E6` | `#8F84FF` | Nav, selection, links |
+| `--pos` / `--neg` / `--warn` | `#178A4E` / `#CF3A31` / `#C77A14` | `#3FD48A` / `#FF6A5F` / `#FFB347` | Sentiment and P&L |
+| `--macro` | `#0E8288` | `#3EC3C9` | Macro themes |
 
-Score color bands:
+Type: **Bricolage Grotesque** for display and headlines (`.display`, `.headline`, `.figure`), **DM Sans** for everything else, with tabular numerals (`.tnum`) on data.
 
-| Score | Color |
-|-------|-------|
-| ≥ 7 | Green |
-| 3 – 6 | Lime |
-| −2 – +2 | Gray (neutral) |
-| −6 – −3 | Amber |
-| ≤ −7 | Red |
+Score bands: ≥7 very positive, 3–6 positive, −2–+2 neutral, −6–−3 negative, ≤−7 very negative (`scoreTone()` in `lib/utils.ts`).
+
+Motion: one load choreography per view (`.rise`, `.stagger`, mood bloom + drift, sparkline draw). `prefers-reduced-motion` disables it.
 
 ---
 

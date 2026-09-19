@@ -54,6 +54,13 @@ RSS Feeds + SEC EDGAR
 
 ---
 
+## Dashboards — which one is production
+
+- **Production dashboard = `web/`** (Next.js 16 App Router + Tailwind v4, deployed on Vercel, auto-deploys on push to `main`). Live: https://market-intelligence-engine-five.vercel.app. See `web/README.md` and `docs/DEPLOY.md`.
+- `src/app.py` (Streamlit) is the legacy dashboard. Do not do UI work there unless asked.
+- Reports (`reports/*.md`) reach the web Brief view via `web/scripts/sync-reports.mjs` at build time.
+- Migration `019_rls_macro_exposure.sql` grants anon read on `macro_sector_exposure` for the web Macro view.
+
 ## Key Files
 
 | File | Role |

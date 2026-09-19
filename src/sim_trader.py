@@ -103,6 +103,35 @@ def _parse_ts(s: str) -> datetime:
     return datetime.fromisoformat(s)
 
 
+def _is_trading_day(sb, day: date) -> bool:
+    """
+    True when the market produced price bars for `day`.
+
+    Derived from the data rather than a hardcoded holiday calendar: price_fetcher
+    runs immediately before the execute step, so if no ticker has a bar for the
+    day, the market was closed (weekend or market holiday).
+
+    Failing closed here is deliberate. If price_fetcher itself failed on a real
+    trading day we report "not a trading day", and execute holds the queue
+    instead of burning it — the safe direction to be wrong in.
+    """
+    day_start = f"{day.isoformat()}T00:00:00+00:00"
+    day_end = f"{(day + timedelta(days=1)).isoformat()}T00:00:00+00:00"
+    try:
+        resp = (
+            sb.table("stock_prices")
+            .select("id")
+            .gte("ts", day_start)
+            .lt("ts", day_end)
+            .limit(1)
+            .execute()
+        )
+        return bool(resp.data)
+    except Exception as exc:
+        log.error("_is_trading_day(%s): %s", day, exc)
+        return False
+
+
 def _fetch_open_price(sb, target_id: int, for_date: date) -> Optional[float]:
     """First 5-min bar price (open → close fallback) for target on date."""
     day_start = f"{for_date.isoformat()}T00:00:00+00:00"
@@ -887,6 +916,20 @@ def run_execute():
     """
     sb = get_supabase()
     today = date.today()
+
+    # The pipeline runs every day, but the market does not. On a weekend or
+    # holiday there is no open price to fill against, so hold the queue for the
+    # next session instead of consuming it. Without this, trades queued on a
+    # Friday or Saturday evening were marked skipped and deleted the next
+    # morning — roughly two of every seven analyze runs thrown away.
+    if not _is_trading_day(sb, today):
+        queued = sb.table("sim_pending_trades").select("id").execute().data or []
+        log.info(
+            "execute: %s is not a trading day — holding %d queued trade(s) for the next session",
+            today, len(queued),
+        )
+        return
+
     portfolio = _get_portfolio(sb)
     cash = float(portfolio["cash_usd"])
     holdings = _get_all_holdings(sb)

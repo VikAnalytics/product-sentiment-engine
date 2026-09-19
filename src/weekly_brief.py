@@ -16,7 +16,7 @@ _src_dir = os.path.dirname(os.path.abspath(__file__))
 if _src_dir not in sys.path:
     sys.path.insert(0, _src_dir)
 
-from config import get_supabase, get_model, MAX_PAYLOAD_CHARS_PER_FIELD
+from config import get_supabase, get_model, fetch_all_rows, MAX_PAYLOAD_CHARS_PER_FIELD
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +57,9 @@ def get_weekly_data() -> list:
     Returns a list of dicts with name, type, description, pros, cons, quotes, sentiment_score.
     """
     supabase = get_supabase()
-    targets_resp = supabase.table("targets").select("*").eq("status", "tracking").execute()
-    targets = getattr(targets_resp, "data", None) or []
+    targets = fetch_all_rows(
+        lambda: supabase.table("targets").select("*").eq("status", "tracking")
+    )
     if not targets:
         return []
 

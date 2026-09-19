@@ -204,6 +204,7 @@ REPORT_EVENT_MAX_AGE_DAYS = 3  # Only include events created within last 3 days 
 | `ai_link_products.py` | AI-driven product→parent linking + creates missing parents |
 | `update_logo_urls.py` | Fetch logos via Clearbit / Google Favicon API |
 | `seed_macro_targets.py` | Seed 8 MACRO themes + sector exposure rows (idempotent; run after migration 017) |
+| `backfill_tickers.py` | Resolve missing company tickers via OpenAI, verified against yfinance name + price history. `--dry-run` / `--limit N` |
 | `test_supabase_key.py` | Validate DB connection |
 
 ---
@@ -473,11 +474,14 @@ US-China Trade Tensions · Russia-Ukraine Conflict · Middle East Tensions · Se
 
 ## Key Implementation Notes
 
-- **Supabase 1000-row cap**: PostgREST silently truncates at 1000 rows even with `.limit(10000)`. Any query returning >1000 rows must loop with `.range(offset, offset+999)`.
+- **Supabase 1000-row cap**: PostgREST silently truncates at 1000 rows even with `.limit(10000)`. Use `fetch_all_rows(lambda: supabase.table(...).select(...))` from `config.py`, which pages with `.range()`. Pass a *factory* — a query builder keeps the range from the previous call. There are now 1,120 tracked targets, so an unpaged `targets` query silently loses 120 of them; this had been hiding targets from the tracker and blinding scout's duplicate detection.
 - **Python 3.9 datetime**: `_parse_iso_dt(ts)` helper normalises fractional seconds to exactly 6 digits before `fromisoformat()`. Supabase timestamps can have 5 decimal places which crash Python 3.9.
 - **Report event age**: `REPORT_EVENT_MAX_AGE_DAYS=3` in config.py — report only includes events created in last 3 days to prevent stale headlines resurfacing.
 - **Product logos**: `_target_logo_url()` falls back to parent company logo when product has no logo set.
 - **Streamlit theme**: `.streamlit/config.toml` must use `base=dark` to match custom CSS — light base causes white-on-white dropdowns.
 - **Reactions unit**: `price_reactions.reaction_7d` is stored as percent (`5.88` = +5.88%). The simulator's `_fetch_price_reactions_history()` converts to fractions on read; never compare raw reaction values against a fraction-unit threshold elsewhere.
 - **MACRO targets**: `scripts/seed_macro_targets.py` is the only way MACRO rows should be created. `scout._save_macro_event` attaches events to existing themes only — it does not create new MACRO rows even if the AI invents a theme name.
+- **Simulator runs daily, the market does not**: `run_execute` returns early when `_is_trading_day()` finds no price bars for the day, leaving the pending queue intact for the next session. Before this, weekend runs marked queued trades `skipped` and then deleted the queue, discarding roughly two of every seven analyze runs.
+- **Headline-only sentiment**: when no source returns chatter, the tracker scores the headline alone and tags the row `source_type='headline_only'` rather than dropping the event. About 29% of events had been getting no reading at all. `_parse_json_sentiment` therefore accepts a row carrying a score but no prose.
+- **Outbound User-Agent**: some public endpoints 403 the default `python-requests` agent. StockTwits did, silently, for months. Use `HTTP_USER_AGENT` from `config.py` for new fetchers.
 - **Telemetry is best-effort**: never wrap the telemetry call site in additional `try/except` — the helper already swallows all exceptions internally. Let it fail silently if the table is missing.

@@ -12,7 +12,10 @@ _src_dir = os.path.dirname(os.path.abspath(__file__))
 if _src_dir not in sys.path:
     sys.path.insert(0, _src_dir)
 
-from config import get_supabase, get_model, LOOKBACK_DAYS, MAX_PAYLOAD_CHARS_PER_FIELD, REPORT_EVENT_MAX_AGE_DAYS
+from config import (
+    get_supabase, get_model, fetch_all_rows,
+    LOOKBACK_DAYS, MAX_PAYLOAD_CHARS_PER_FIELD, REPORT_EVENT_MAX_AGE_DAYS,
+)
 from sentiment_dedupe import normalize_for_dedupe
 
 logger = logging.getLogger(__name__)
@@ -58,8 +61,9 @@ def get_cloud_data():
     Returns one report item per (target, event) that has sentiment, so we can show which event caused what.
     """
     supabase = get_supabase()
-    targets_response = supabase.table("targets").select("*").eq("status", "tracking").execute()
-    targets = getattr(targets_response, "data", None) or []
+    targets = fetch_all_rows(
+        lambda: supabase.table("targets").select("*").eq("status", "tracking")
+    )
 
     if not targets:
         return []
@@ -227,8 +231,7 @@ def save_report(report_content: str) -> str:
 
 def _build_event_lookup(supabase):
     """Build normalized (target_name, headline) -> event_id; norm_target -> [event_id]; norm_target -> target_id."""
-    targets_resp = supabase.table("targets").select("id, name").execute()
-    targets_list = getattr(targets_resp, "data", None) or []
+    targets_list = fetch_all_rows(lambda: supabase.table("targets").select("id, name"))
     targets = {t["id"]: (t.get("name") or "").strip() for t in targets_list}
     name_to_target_id = {normalize_for_dedupe(t.get("name") or ""): t["id"] for t in targets_list if t.get("id")}
     events_resp = supabase.table("events").select("id, target_id, headline").execute()

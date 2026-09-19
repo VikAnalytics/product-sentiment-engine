@@ -30,6 +30,8 @@ from config import (
     GOOGLE_NEWS_LIMIT,
     MAX_CHATTER_CHARS,
     EVENT_MAX_AGE_DAYS,
+    fetch_all_rows,
+    HTTP_USER_AGENT,
 )
 
 logger = logging.getLogger(__name__)
@@ -172,7 +174,10 @@ def search_stocktwits(ticker: str) -> str:
         return ""
     url = f"https://api.stocktwits.com/api/2/streams/symbol/{requests.utils.quote(ticker)}.json"
     try:
-        response = requests.get(url, timeout=HTTP_TIMEOUT_SEC)
+        # StockTwits 403s the default requests agent, so send a browser one.
+        response = requests.get(
+            url, timeout=HTTP_TIMEOUT_SEC, headers={"User-Agent": HTTP_USER_AGENT}
+        )
         if response.status_code != 200:
             logger.warning("StockTwits returned %s for ticker=%r", response.status_code, ticker)
             return ""
@@ -283,7 +288,14 @@ def _parse_json_sentiment(text: str) -> Optional[dict]:
     quotes = str(data.get("verbatim_quotes") or "").strip()
     url = str(data.get("source_url") or "").strip()
 
-    if not any([pros, cons, quotes]):
+    raw_score = data.get("sentiment_score")
+    has_score = raw_score is not None and str(raw_score).strip() != ""
+
+    # A reading with a score but no prose is still usable: it drives the feed badge,
+    # the rankings and the simulator's sentiment factor. Only reject when the model
+    # gave us nothing at all. Headline-only events land here most often, since there
+    # is no chatter to quote.
+    if not any([pros, cons, quotes]) and not has_score:
         return None
 
     result = {
@@ -295,8 +307,7 @@ def _parse_json_sentiment(text: str) -> Optional[dict]:
         "implication_tag": None,
     }
 
-    raw_score = data.get("sentiment_score")
-    if raw_score is not None:
+    if has_score:
         try:
             result["sentiment_score"] = max(-10, min(10, int(raw_score)))
         except (TypeError, ValueError):
@@ -347,8 +358,9 @@ def run_tracker() -> None:
     """For each tracking target and each of its events, fetch chatter, vector-filter, extract sentiment, and save if net-new."""
     logger.info("Starting tracker (per-event). dry_run=%s max_events=%s", DRY_RUN, os.getenv("TRACKER_MAX_EVENTS", "0"))
     supabase = get_supabase()
-    targets_result = supabase.table("targets").select("*").eq("status", "tracking").execute()
-    targets = getattr(targets_result, "data", None) or []
+    targets = fetch_all_rows(
+        lambda: supabase.table("targets").select("*").eq("status", "tracking")
+    )
     if not targets:
         return
 
@@ -451,12 +463,24 @@ def run_tracker() -> None:
                 bool(stocktwits_data), bool(yahoo_data), bool(gnews_data),
             )
 
+            # No community chatter does not mean no signal. The headline itself is
+            # market information ("Buffett steps down as chairman" needs no Reddit
+            # thread to be readable), and obscure products simply have no forum
+            # presence. Dropping these events left roughly a third of the feed with
+            # no score at all, so fall back to scoring the headline on its own and
+            # mark the row so headline-only readings stay distinguishable.
+            headline_only = False
             if not combined_chatter.strip():
+                if not headline or headline.strip() == "(general)":
+                    logger.info("   -> No chatter and no usable headline. Skipping.")
+                    continue
+                combined_chatter = f"[SOURCE: Headline] {headline}"
+                source_type = "headline_only"
+                headline_only = True
                 logger.info(
-                    "   -> No fresh chatter (hn=%s reddit=%s news=%s).",
+                    "   -> No fresh chatter (hn=%s reddit=%s news=%s) — scoring headline alone.",
                     bool(hn_data), bool(reddit_data), bool(news_data),
                 )
-                continue
 
             events_processed += 1
 
@@ -495,6 +519,14 @@ def run_tracker() -> None:
                     continue
 
             tracking_context = headline
+            # With only a headline there is nothing to quote and no source to cite,
+            # so say so rather than letting the model invent either.
+            mode_note = (
+                "\nThere is no community chatter for this event, only the headline. "
+                "Judge it on the headline alone, leave verbatim_quotes and source_url "
+                "as empty strings, and keep the score conservative.\n"
+                if headline_only else ""
+            )
             prompt = f"""
 You are a Principal Market Intelligence Analyst.
 We are tracking: "{name}" in the context of: "{tracking_context}".
@@ -515,7 +547,7 @@ implication_tag rules:
 - opportunity: positive signal about a gap or weakness we could exploit
 - monitor: ambiguous/early signal worth watching but not yet actionable
 - no_action: neutral noise with no clear strategic implication
-
+{mode_note}
 Chatter data:
 {combined_chatter}
 """

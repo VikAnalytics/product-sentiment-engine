@@ -14,7 +14,7 @@ if _src_dir not in sys.path:
 import feedparser
 import spacy
 
-from config import get_supabase, get_model, ARTICLES_PER_FEED
+from config import get_supabase, get_model, fetch_all_rows, ARTICLES_PER_FEED
 from domain_resolver import resolve_domain
 from normalize import normalize_target_name
 
@@ -132,9 +132,11 @@ def _resolve_parent_id(supabase, parent_company_name: str) -> Optional[int]:
     if rows:
         return rows[0].get("id")
     # Fuzzy fallback: normalized name match
-    all_companies = supabase.table("targets").select("id, name").eq("target_type", "COMPANY").execute()
+    all_companies = fetch_all_rows(
+        lambda: supabase.table("targets").select("id, name").eq("target_type", "COMPANY")
+    )
     norm_parent = normalize_target_name(parent_company_name)
-    for c in (getattr(all_companies, "data", None) or []):
+    for c in all_companies:
         if normalize_target_name(c.get("name") or "") == norm_parent:
             return c.get("id")
     return None
@@ -222,8 +224,9 @@ def save_target_to_db(target_type: str, name: str, description: str, parent_comp
             return
 
         # No exact match: check normalized name to avoid "M4 iPad Air" vs "iPad Air M4" duplicates
-        all_same_type = supabase.table("targets").select("id, name").eq("target_type", target_type).execute()
-        same_type_list = getattr(all_same_type, "data", None) or []
+        same_type_list = fetch_all_rows(
+            lambda: supabase.table("targets").select("id, name").eq("target_type", target_type)
+        )
         norm_new = normalize_target_name(name)
         for t in same_type_list:
             if normalize_target_name(t.get("name") or "") == norm_new:

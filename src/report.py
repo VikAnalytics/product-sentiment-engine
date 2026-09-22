@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import sys
+import time
 from datetime import datetime, timedelta
 
 # Allow importing config when running as python src/report.py from repo root
@@ -12,7 +13,10 @@ _src_dir = os.path.dirname(os.path.abspath(__file__))
 if _src_dir not in sys.path:
     sys.path.insert(0, _src_dir)
 
-from config import get_supabase, get_model, LOOKBACK_DAYS, MAX_PAYLOAD_CHARS_PER_FIELD, REPORT_EVENT_MAX_AGE_DAYS
+from config import (
+    get_supabase, get_model, fetch_all_rows,
+    LOOKBACK_DAYS, MAX_PAYLOAD_CHARS_PER_FIELD, REPORT_EVENT_MAX_AGE_DAYS,
+)
 from sentiment_dedupe import normalize_for_dedupe
 
 logger = logging.getLogger(__name__)
@@ -58,8 +62,9 @@ def get_cloud_data():
     Returns one report item per (target, event) that has sentiment, so we can show which event caused what.
     """
     supabase = get_supabase()
-    targets_response = supabase.table("targets").select("*").eq("status", "tracking").execute()
-    targets = getattr(targets_response, "data", None) or []
+    targets = fetch_all_rows(
+        lambda: supabase.table("targets").select("*").eq("status", "tracking").order("id")
+    )
 
     if not targets:
         return []
@@ -198,12 +203,29 @@ def generate_batch_report(data):
     {batch_text}
     """
 
+    # Retry before falling back. Most failures here are rate limits, which clear
+    # in seconds; a placeholder report published because we gave up after one try
+    # is worse than a report that takes a minute longer.
+    last_error = None
+    for attempt, wait in enumerate((0, 20, 60), start=1):
+        if wait:
+            logger.info("   Retrying report generation in %ds (attempt %d of 3)...", wait, attempt)
+            time.sleep(wait)
+        try:
+            model = get_model()
+            response = model.generate_content(prompt)
+            text = (response.text or "").strip()
+            if text:
+                return (text, False)
+            last_error = "model returned empty text"
+        except Exception as e:
+            last_error = e
+            logger.warning("   Report generation attempt %d failed: %s", attempt, e)
+
     try:
-        model = get_model()
-        response = model.generate_content(prompt)
-        return (response.text or "", False)
+        raise RuntimeError(last_error) if not isinstance(last_error, Exception) else last_error
     except Exception as e:
-        logger.warning("   ⚠️ AI Limit Hit. Generating Mock Intelligence Report instead: %s", e)
+        logger.warning("   ⚠️ AI unavailable after 3 attempts. Falling back to a raw summary: %s", e)
         mock = "# 🌐 Daily Market Intelligence Report (MOCK)\n\n*Data pending AI quota reset.*\n\n## Raw Intelligence Summary\n\n"
         for item in data:
             pros = (item.get("pros") or "")[:75]
@@ -225,10 +247,25 @@ def save_report(report_content: str) -> str:
 
 
 
+def _save_degraded(content: str) -> str:
+    """
+    Write an unpublished raw summary next to the reports.
+
+    Deliberately not named market_intelligence_*.md: the dashboard and the weekly
+    brief both pick up files by that prefix, and a placeholder must never be
+    mistaken for a report someone can act on.
+    """
+    os.makedirs(REPORTS_DIR, exist_ok=True)
+    stamp = datetime.now().strftime("%Y-%m-%d")
+    path = os.path.join(REPORTS_DIR, f"UNPUBLISHED_raw_summary_{stamp}.md")
+    with open(path, "w") as f:
+        f.write(content)
+    return path
+
+
 def _build_event_lookup(supabase):
     """Build normalized (target_name, headline) -> event_id; norm_target -> [event_id]; norm_target -> target_id."""
-    targets_resp = supabase.table("targets").select("id, name").execute()
-    targets_list = getattr(targets_resp, "data", None) or []
+    targets_list = fetch_all_rows(lambda: supabase.table("targets").select("id, name").order("id"))
     targets = {t["id"]: (t.get("name") or "").strip() for t in targets_list}
     name_to_target_id = {normalize_for_dedupe(t.get("name") or ""): t["id"] for t in targets_list if t.get("id")}
     events_resp = supabase.table("events").select("id, target_id, headline").execute()
@@ -314,23 +351,33 @@ def parse_report_and_store_analyses(report_content: str) -> int:
     return updated
 
 
-def run_reporter() -> None:
-    """Load cloud data, generate report, save to file."""
+def run_reporter() -> dict:
+    """Load cloud data, generate the report, and publish it only if it is real."""
     logger.info("Starting the V3 Intelligence Reporter...\n")
     data = get_cloud_data()
 
     if not data:
         logger.info("No fresh intelligence data found for today.")
-        return
+        return {"targets": 0, "published": False}
 
     logger.info("Drafting comprehensive intelligence report for %d targets...", len(data))
     report_content, is_mock = generate_batch_report(data)
-    save_report(report_content)
-    # Always parse and store analyses from whatever we saved (real or mock; mock format just matches nothing)
-    parse_report_and_store_analyses(report_content)
+
     if is_mock:
-        logger.info("(Mock report used due to AI limit.)")
+        # A placeholder saved under the normal filename is indistinguishable from a
+        # real report to anything that reads the directory, and the dashboard shows
+        # the newest file. Seven of 65 reports were placeholders this way, including
+        # the most recent weekly brief. Keep the raw summary for diagnosis, but under
+        # a name nothing treats as a published report, so readers keep seeing the
+        # last good one.
+        path = _save_degraded(report_content)
+        logger.warning("   ⚠️ Report NOT published: AI unavailable. Raw summary kept at %s", path)
+        return {"targets": len(data), "published": False, "degraded_path": path}
+
+    path = save_report(report_content)
+    analyses = parse_report_and_store_analyses(report_content)
     logger.info("✅ Reporter completed successfully.")
+    return {"targets": len(data), "published": True, "path": path, "analyses_stored": analyses}
 
 
 if __name__ == "__main__":
@@ -351,5 +398,9 @@ if __name__ == "__main__":
         n = parse_report_and_store_analyses(content)
         logging.info("✅ Stored strategic analysis for %d event(s). Refresh the dashboard.", n)
     else:
-        with step("report"):
-            run_reporter()
+        with step("report") as s:
+            m = run_reporter()
+            s.rows(m.get("analyses_stored"))
+            s.note(**m)
+            s.check(not m.get("published") and m.get("targets", 0) > 0,
+                    "no report published: AI unavailable after retries")

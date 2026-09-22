@@ -7,6 +7,7 @@ Run manually:
 Or triggered weekly by GitHub Actions (every Monday).
 """
 import logging
+import time
 import os
 import re
 import sys
@@ -16,7 +17,7 @@ _src_dir = os.path.dirname(os.path.abspath(__file__))
 if _src_dir not in sys.path:
     sys.path.insert(0, _src_dir)
 
-from config import get_supabase, get_model, MAX_PAYLOAD_CHARS_PER_FIELD
+from config import get_supabase, get_model, fetch_all_rows, MAX_PAYLOAD_CHARS_PER_FIELD
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +58,9 @@ def get_weekly_data() -> list:
     Returns a list of dicts with name, type, description, pros, cons, quotes, sentiment_score.
     """
     supabase = get_supabase()
-    targets_resp = supabase.table("targets").select("*").eq("status", "tracking").execute()
-    targets = getattr(targets_resp, "data", None) or []
+    targets = fetch_all_rows(
+        lambda: supabase.table("targets").select("*").eq("status", "tracking").order("id")
+    )
     if not targets:
         return []
 
@@ -198,12 +200,28 @@ Raw intelligence (7-day window):
 {batch_text}
 """
 
+    # Same retry policy as the daily report: most failures are transient rate
+    # limits, and a placeholder brief is worse than a slow one.
+    last_error = None
+    for attempt, wait in enumerate((0, 20, 60), start=1):
+        if wait:
+            logger.info("Retrying brief generation in %ds (attempt %d of 3)...", wait, attempt)
+            time.sleep(wait)
+        try:
+            model = get_model()
+            response = model.generate_content(prompt)
+            text = (response.text or "").strip()
+            if text:
+                return (text, False)
+            last_error = "model returned empty text"
+        except Exception as e:
+            last_error = e
+            logger.warning("Brief generation attempt %d failed: %s", attempt, e)
+
     try:
-        model = get_model()
-        response = model.generate_content(prompt)
-        return (response.text or "", False)
+        raise RuntimeError(last_error) if not isinstance(last_error, Exception) else last_error
     except Exception as e:
-        logger.warning("AI limit hit, generating mock weekly brief: %s", e)
+        logger.warning("AI unavailable after 3 attempts, keeping a raw summary only: %s", e)
         mock = (
             f"# 📋 Weekly Executive Brief — {date_range_start}–{date_range_end} (MOCK)\n\n"
             "*AI quota reached. Displaying raw data summary.*\n\n"
@@ -226,18 +244,30 @@ def save_weekly_brief(content: str) -> str:
     return file_path
 
 
-def run_weekly_brief() -> None:
+def run_weekly_brief() -> dict:
     logger.info("Starting weekly brief generator (last %d days)...", LOOKBACK_DAYS)
     data = get_weekly_data()
     if not data:
         logger.info("No data found for the past %d days.", LOOKBACK_DAYS)
-        return
+        return {"pairs": 0, "published": False}
     logger.info("Generating weekly brief across %d target/event pairs...", len(data))
     content, is_mock = generate_weekly_brief(data)
-    path = save_weekly_brief(content)
+
     if is_mock:
-        logger.info("(Mock brief — AI quota reached.)")
+        # Do not publish under weekly_brief_*.md. The dashboard shows the newest
+        # brief by that name, so a placeholder replaces a real one in the reader's
+        # view — which is exactly what happened to week 18.
+        os.makedirs(REPORTS_DIR, exist_ok=True)
+        stamp = datetime.now().strftime("%Y-%m-%d")
+        path = os.path.join(REPORTS_DIR, f"UNPUBLISHED_raw_weekly_{stamp}.md")
+        with open(path, "w") as f:
+            f.write(content)
+        logger.warning("⚠️ Weekly brief NOT published: AI unavailable. Raw summary at %s", path)
+        return {"pairs": len(data), "published": False, "degraded_path": path}
+
+    path = save_weekly_brief(content)
     logger.info("✅ Weekly brief complete: %s", path)
+    return {"pairs": len(data), "published": True, "path": path}
 
 
 if __name__ == "__main__":
@@ -246,5 +276,9 @@ if __name__ == "__main__":
 
     setup_logging()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    with step("weekly_brief"):
-        run_weekly_brief()
+    with step("weekly_brief") as s:
+        m = run_weekly_brief()
+        s.rows(m.get("pairs"))
+        s.note(**m)
+        s.check(not m.get("published") and m.get("pairs", 0) > 0,
+                "no weekly brief published: AI unavailable after retries")

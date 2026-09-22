@@ -32,6 +32,7 @@ class _StepHandle:
     def __init__(self) -> None:
         self._rows: Optional[int] = None
         self._extra: Dict[str, Any] = {}
+        self._degraded: list = []
 
     def rows(self, count: Optional[int]) -> None:
         """Record how many rows the step processed (optional)."""
@@ -45,6 +46,24 @@ class _StepHandle:
     def note(self, **kwargs: Any) -> None:
         """Attach arbitrary JSON-serializable metadata to the run record."""
         self._extra.update(kwargs)
+
+    def degrade(self, reason: str) -> None:
+        """
+        Record that the step finished but did not do its job properly.
+
+        A step that completes is not the same as a step that worked. StockTwits
+        answered 403 for months and the tracker dropped roughly a third of its
+        events, all while every run recorded 'success', because the only thing
+        being measured was whether Python raised. Call this when a step's own
+        numbers say something is wrong; several reasons may be recorded.
+        """
+        if reason:
+            self._degraded.append(reason)
+
+    def check(self, condition: bool, reason: str) -> None:
+        """Convenience: degrade when `condition` is true."""
+        if condition:
+            self.degrade(reason)
 
 
 def _insert_start(sb, step_name: str) -> Optional[int]:
@@ -84,6 +103,17 @@ def _finalize(sb, run_id: Optional[int], status: str, duration_ms: int,
             update["error_message"] = error[:2000]
         sb.table("pipeline_runs").update(update).eq("id", run_id).execute()
     except Exception as exc:
+        # 'degraded' needs migration 020. Without it the CHECK constraint rejects
+        # the write, which would strand the row at 'running'. Record the run as a
+        # success carrying the reason rather than losing it entirely.
+        if status == "degraded":
+            try:
+                update["status"] = "success"
+                sb.table("pipeline_runs").update(update).eq("id", run_id).execute()
+                log.debug("telemetry: 'degraded' rejected (apply migration 020); recorded as success.")
+                return
+            except Exception:
+                pass
         log.debug("telemetry: could not finalize run %s (%s).", run_id, exc)
 
 
@@ -123,7 +153,14 @@ def step(step_name: str) -> Iterator[_StepHandle]:
         raise
     else:
         elapsed_ms = int((time.monotonic() - start) * 1000)
-        log.info("pipeline step '%s' ok in %dms (rows=%s)",
-                 step_name, elapsed_ms, handle._rows if handle._rows is not None else "—")
-        if sb is not None:
-            _finalize(sb, run_id, "success", elapsed_ms, handle._rows, handle._extra, None)
+        rows_label = handle._rows if handle._rows is not None else "—"
+        if handle._degraded:
+            reason = "; ".join(handle._degraded)
+            log.warning("pipeline step '%s' DEGRADED in %dms (rows=%s): %s",
+                        step_name, elapsed_ms, rows_label, reason)
+            if sb is not None:
+                _finalize(sb, run_id, "degraded", elapsed_ms, handle._rows, handle._extra, reason)
+        else:
+            log.info("pipeline step '%s' ok in %dms (rows=%s)", step_name, elapsed_ms, rows_label)
+            if sb is not None:
+                _finalize(sb, run_id, "success", elapsed_ms, handle._rows, handle._extra, None)

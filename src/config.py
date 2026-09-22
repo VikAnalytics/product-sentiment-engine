@@ -32,6 +32,9 @@ SIM_STARTING_CAPITAL        = 1000.00  # virtual starting cash
 SIM_MAX_POSITIONS           = 5        # max open positions at once
 SIM_MIN_SCORE               = 3        # min avg sentiment_score to be a buy candidate
 SIM_SENTIMENT_LOOKBACK_HOURS = 72      # how far back to look for sentiment signals in analyze step
+# Indices the simulator is measured against. QQQ is the honest comparison, since
+# the tracked universe skews tech; SPY is the broad-market reference.
+SIM_BENCHMARKS              = ("SPY", "QQQ")
 
 _supabase_client = None
 _openai_client = None
@@ -106,3 +109,55 @@ def get_json_model() -> _OpenAIModel:
     """Return OpenAI model wrapper configured for structured JSON output.
     Use this for structured extraction (tracker); use get_model() for free-form reports."""
     return _OpenAIModel(_get_openai_client(), OPENAI_MODEL_NAME, json_mode=True)
+
+
+# ---------------------------------------------------------------------------
+# Outbound HTTP
+# ---------------------------------------------------------------------------
+
+# Several public endpoints reject the default "python-requests/x.y" agent with a
+# 403. StockTwits is one: it returned 403 for every call for months, and because
+# the fetcher only logged a warning the source silently contributed nothing.
+HTTP_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+
+
+# ---------------------------------------------------------------------------
+# Supabase paging
+# ---------------------------------------------------------------------------
+
+SUPABASE_PAGE_SIZE = 1000
+
+
+def fetch_all_rows(make_query, page_size: int = SUPABASE_PAGE_SIZE) -> list:
+    """
+    Run a PostgREST query in pages and return every row.
+
+    PostgREST silently truncates a response at 1000 rows even when .limit() asks
+    for more, so any query whose result can exceed that must page explicitly.
+    Truncation is silent, which makes it read as missing data rather than an error.
+
+    `make_query` is called once per page and must return a *fresh* query builder,
+    because the builder carries the range from the previous call.
+
+    The query MUST specify a stable order. Paging an unordered query is not safe:
+    Postgres may return rows in a different order for each page request, so rows
+    can be skipped or returned twice, and the result changes between identical
+    runs. Order by the primary key unless you need something else:
+
+        targets = fetch_all_rows(
+            lambda: supabase.table("targets").select("*")
+                    .eq("status", "tracking").order("id")
+        )
+    """
+    rows: list = []
+    offset = 0
+    while True:
+        resp = make_query().range(offset, offset + page_size - 1).execute()
+        batch = getattr(resp, "data", None) or []
+        rows.extend(batch)
+        if len(batch) < page_size:
+            return rows
+        offset += page_size

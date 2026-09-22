@@ -12,9 +12,10 @@ if _src_dir not in sys.path:
     sys.path.insert(0, _src_dir)
 
 import feedparser
+from urllib.parse import urlparse
 import spacy
 
-from config import get_supabase, get_model, ARTICLES_PER_FEED
+from config import get_supabase, get_model, fetch_all_rows, ARTICLES_PER_FEED, HTTP_USER_AGENT
 from domain_resolver import resolve_domain
 from normalize import normalize_target_name
 
@@ -81,26 +82,29 @@ RSS_FEEDS = [
     "https://www.engadget.com/rss.xml",
     "https://www.zdnet.com/news/rss.xml",
     # Financial / market news
-    "https://feeds.reuters.com/reuters/businessNews",
-    "https://feeds.reuters.com/reuters/financialsNews",
+    # Reuters retired its public RSS feeds, so reach its reporting through a
+    # site-scoped Google News query instead. Same for AP further down.
+    "https://news.google.com/rss/search?q=when:1d+site:reuters.com+business&hl=en-US&gl=US&ceid=US:en",
+    "https://news.google.com/rss/search?q=when:1d+site:reuters.com+markets&hl=en-US&gl=US&ceid=US:en",
     "https://finance.yahoo.com/news/rssindex",
     "https://feeds.marketwatch.com/marketwatch/topstories/",
     "https://feeds.marketwatch.com/marketwatch/marketpulse/",
     "https://www.cnbc.com/id/100003114/device/rss/rss.html",
     "https://www.cnbc.com/id/10000664/device/rss/rss.html",
     # Analyst / investing commentary
-    "https://feeds.benzinga.com/benzinga",
+    "https://www.benzinga.com/feed",
     "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml",
-    "https://apnews.com/hub/business?format=rss",
+    "https://news.google.com/rss/search?q=when:1d+site:apnews.com+business&hl=en-US&gl=US&ceid=US:en",
     "https://fortune.com/feed/",
+    "https://www.theguardian.com/uk/business/rss",
     # Regulatory / government
-    "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&dateb=&owner=include&count=20&output=atom",
+    "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&company=&dateb=&owner=include&count=40&output=atom",
     "https://www.ftc.gov/feeds/press-release.xml",
-    "https://www.fda.gov/about-fda/contact-fda/stay-informed/rss-feeds/fda-news-releases/rss.xml",
+    "https://www.fda.gov/about-fda/contact-fda/stay-informed/rss-feeds/press-releases/rss.xml",
     # Geopolitics / global policy
-    "https://feeds.reuters.com/Reuters/worldNews",
+    "https://news.google.com/rss/search?q=when:1d+site:reuters.com+world&hl=en-US&gl=US&ceid=US:en",
     "https://feeds.bbci.co.uk/news/world/rss.xml",
-    "https://apnews.com/hub/world-news?format=rss",
+    "https://news.google.com/rss/search?q=when:1d+site:apnews.com+world&hl=en-US&gl=US&ceid=US:en",
     "https://www.aljazeera.com/xml/rss/all.xml",
     "https://www.politico.eu/feed/",
     "https://foreignpolicy.com/feed/",
@@ -132,9 +136,11 @@ def _resolve_parent_id(supabase, parent_company_name: str) -> Optional[int]:
     if rows:
         return rows[0].get("id")
     # Fuzzy fallback: normalized name match
-    all_companies = supabase.table("targets").select("id, name").eq("target_type", "COMPANY").execute()
+    all_companies = fetch_all_rows(
+        lambda: supabase.table("targets").select("id, name").eq("target_type", "COMPANY").order("id")
+    )
     norm_parent = normalize_target_name(parent_company_name)
-    for c in (getattr(all_companies, "data", None) or []):
+    for c in all_companies:
         if normalize_target_name(c.get("name") or "") == norm_parent:
             return c.get("id")
     return None
@@ -222,8 +228,9 @@ def save_target_to_db(target_type: str, name: str, description: str, parent_comp
             return
 
         # No exact match: check normalized name to avoid "M4 iPad Air" vs "iPad Air M4" duplicates
-        all_same_type = supabase.table("targets").select("id, name").eq("target_type", target_type).execute()
-        same_type_list = getattr(all_same_type, "data", None) or []
+        same_type_list = fetch_all_rows(
+            lambda: supabase.table("targets").select("id, name").eq("target_type", target_type).order("id")
+        )
         norm_new = normalize_target_name(name)
         for t in same_type_list:
             if normalize_target_name(t.get("name") or "") == norm_new:
@@ -307,16 +314,43 @@ def _fetch_macro_theme_names() -> list:
         return []
 
 
-def run_scout() -> None:
-    """Gather RSS articles, filter by concepts, then batch-extract targets via AI and save to DB."""
+# sec.gov and ftc.gov reject feedparser's default agent outright, which is how
+# four feeds came to return nothing without ever raising. The SEC additionally
+# asks automated clients to identify themselves with a contact address.
+SEC_USER_AGENT = "Market Intelligence Engine (contact: indivikrant@gmail.com)"
+
+
+def _agent_for(feed_url: str) -> str:
+    return SEC_USER_AGENT if "sec.gov" in feed_url else HTTP_USER_AGENT
+
+
+def run_scout() -> dict:
+    """
+    Gather RSS articles, filter by concepts, then batch-extract targets via AI and save to DB.
+
+    Returns a metrics dict for telemetry, including how many feeds actually
+    yielded entries: a feed that quietly stops serving looks like slow news.
+    """
     logger.info("Gathering articles from %d sources...\n", len(RSS_FEEDS))
     articles_to_analyze = []
+    metrics = {
+        "feeds": len(RSS_FEEDS), "feeds_with_entries": 0, "feeds_failed": 0,
+        "articles_seen": 0, "articles_relevant": 0, "lines_parsed": 0, "ai_error": False,
+        "silent_feeds": [],
+    }
 
     for feed_url in RSS_FEEDS:
         try:
             logger.info("📡 Scanning: %s", feed_url)
-            feed = feedparser.parse(feed_url)
+            feed = feedparser.parse(feed_url, agent=_agent_for(feed_url))
             entries = getattr(feed, "entries", [])[:ARTICLES_PER_FEED]
+            if entries:
+                metrics["feeds_with_entries"] += 1
+            else:
+                # Name them: a feed that stops serving looks exactly like a quiet
+                # news day unless you can see which one went silent.
+                metrics["silent_feeds"].append(urlparse(feed_url).netloc or feed_url[:60])
+            metrics["articles_seen"] += len(entries)
             for entry in entries:
                 title = getattr(entry, "title", "") or ""
                 summary = entry.get("summary", "") or ""
@@ -324,10 +358,13 @@ def run_scout() -> None:
                     articles_to_analyze.append(f"Title: {title}\nSummary: {summary}\n")
         except Exception as e:
             logger.warning("Could not read %s: %s", feed_url, e)
+            metrics["feeds_failed"] += 1
+            metrics["silent_feeds"].append(urlparse(feed_url).netloc or feed_url[:60])
 
+    metrics["articles_relevant"] = len(articles_to_analyze)
     if not articles_to_analyze:
         logger.info("No market-moving articles found today.")
-        return
+        return metrics
 
     logger.info(
         "Filtered raw articles down to %d highly relevant ones. Sending ONE batch request to the AI...\n",
@@ -368,14 +405,18 @@ def run_scout() -> None:
         raw_text = (response.text or "").strip()
         if raw_text.upper() == "NONE":
             logger.info("AI found no entities to extract.")
-            return
+            return metrics
         for line in raw_text.split("\n"):
             parsed = _parse_ai_extraction_line(line)
             if parsed:
+                metrics["lines_parsed"] += 1
                 save_target_to_db(parsed[0], parsed[1], parsed[2], parsed[3])
         logger.info("✅ Scout completed successfully.")
     except Exception as e:
         logger.error("⚠️ AI API Error (You might still be out of quota!): %s", e)
+        metrics["ai_error"] = True
+
+    return metrics
 
 
 if __name__ == "__main__":
@@ -384,5 +425,17 @@ if __name__ == "__main__":
 
     setup_logging()
     logging.basicConfig(level=logging.INFO, format="%(message)s")  # no-op if handlers exist
-    with step("scout"):
-        run_scout()
+    with step("scout") as s:
+        m = run_scout()
+        s.rows(m["lines_parsed"])
+        s.note(**m)
+        # Feeds rot silently: a dead one returns an empty list, not an error.
+        s.check(m["feeds_with_entries"] == 0, "no RSS feed returned any entries")
+        # All 26 feeds return entries as of this change, so a quarter going quiet
+        # means rot rather than a slow news day. silent_feeds names which.
+        s.check(m["feeds_with_entries"] / max(1, m["feeds"]) < 0.75,
+                f"only {m['feeds_with_entries']} of {m['feeds']} feeds returned entries: "
+                f"{', '.join(m['silent_feeds'][:6])}")
+        s.check(m["ai_error"], "extraction call failed, no targets or events created")
+        s.check(m["articles_relevant"] > 0 and m["lines_parsed"] == 0,
+                "relevant articles found but nothing extracted from them")

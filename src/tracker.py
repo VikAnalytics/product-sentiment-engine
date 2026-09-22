@@ -30,6 +30,8 @@ from config import (
     GOOGLE_NEWS_LIMIT,
     MAX_CHATTER_CHARS,
     EVENT_MAX_AGE_DAYS,
+    fetch_all_rows,
+    HTTP_USER_AGENT,
 )
 
 logger = logging.getLogger(__name__)
@@ -172,7 +174,10 @@ def search_stocktwits(ticker: str) -> str:
         return ""
     url = f"https://api.stocktwits.com/api/2/streams/symbol/{requests.utils.quote(ticker)}.json"
     try:
-        response = requests.get(url, timeout=HTTP_TIMEOUT_SEC)
+        # StockTwits 403s the default requests agent, so send a browser one.
+        response = requests.get(
+            url, timeout=HTTP_TIMEOUT_SEC, headers={"User-Agent": HTTP_USER_AGENT}
+        )
         if response.status_code != 200:
             logger.warning("StockTwits returned %s for ticker=%r", response.status_code, ticker)
             return ""
@@ -283,7 +288,14 @@ def _parse_json_sentiment(text: str) -> Optional[dict]:
     quotes = str(data.get("verbatim_quotes") or "").strip()
     url = str(data.get("source_url") or "").strip()
 
-    if not any([pros, cons, quotes]):
+    raw_score = data.get("sentiment_score")
+    has_score = raw_score is not None and str(raw_score).strip() != ""
+
+    # A reading with a score but no prose is still usable: it drives the feed badge,
+    # the rankings and the simulator's sentiment factor. Only reject when the model
+    # gave us nothing at all. Headline-only events land here most often, since there
+    # is no chatter to quote.
+    if not any([pros, cons, quotes]) and not has_score:
         return None
 
     result = {
@@ -295,8 +307,7 @@ def _parse_json_sentiment(text: str) -> Optional[dict]:
         "implication_tag": None,
     }
 
-    raw_score = data.get("sentiment_score")
-    if raw_score is not None:
+    if has_score:
         try:
             result["sentiment_score"] = max(-10, min(10, int(raw_score)))
         except (TypeError, ValueError):
@@ -343,14 +354,29 @@ def _parse_ai_sentiment_line(line: str) -> Optional[dict]:
     return result
 
 
-def run_tracker() -> None:
-    """For each tracking target and each of its events, fetch chatter, vector-filter, extract sentiment, and save if net-new."""
+def run_tracker() -> dict:
+    """
+    For each tracking target and each of its events, fetch chatter, vector-filter,
+    extract sentiment, and save if net-new.
+
+    Returns a metrics dict for telemetry. The counters matter as much as the work:
+    a run that writes nothing looks identical to a healthy one from the outside.
+    """
     logger.info("Starting tracker (per-event). dry_run=%s max_events=%s", DRY_RUN, os.getenv("TRACKER_MAX_EVENTS", "0"))
     supabase = get_supabase()
-    targets_result = supabase.table("targets").select("*").eq("status", "tracking").execute()
-    targets = getattr(targets_result, "data", None) or []
+    metrics = {
+        "targets": 0, "events_seen": 0, "scored": 0, "headline_only": 0,
+        "skipped_stale": 0, "skipped_already_scanned": 0, "skipped_duplicate": 0,
+        "ai_errors": 0, "source_hits": {k: 0 for k in
+                                        ("hn", "reddit", "google_news", "gnews_general",
+                                         "stocktwits", "yahoo_finance")},
+    }
+    targets = fetch_all_rows(
+        lambda: supabase.table("targets").select("*").eq("status", "tracking").order("id")
+    )
+    metrics["targets"] = len(targets)
     if not targets:
-        return
+        return metrics
 
     today_str = datetime.utcnow().strftime("%Y-%m-%d")
 
@@ -382,8 +408,9 @@ def run_tracker() -> None:
         for event in events_list:
             if max_events and events_processed >= max_events:
                 logger.info("Reached TRACKER_MAX_EVENTS=%s. Stopping early.", max_events)
-                return
+                return metrics
 
+            metrics["events_seen"] += 1
             event_id = event.get("id")
             headline = (event.get("headline") or "").strip() or "(general)"
 
@@ -394,6 +421,7 @@ def run_tracker() -> None:
                     event_dt = datetime.fromisoformat(raw_created.replace("Z", "+00:00")).replace(tzinfo=None)
                     if event_dt < cutoff_dt:
                         logger.debug("   -> Event too old (%s), skipping: %s [%s]", raw_created[:10], name, headline[:40])
+                        metrics["skipped_stale"] += 1
                         continue
                 except ValueError:
                     pass
@@ -408,6 +436,7 @@ def run_tracker() -> None:
             existing_data = getattr(existing, "data", None)
             if existing_data and len(existing_data) > 0:
                 logger.info("   -> Already scanned %s [%s] today. Skipping.", name, headline[:40])
+                metrics["skipped_already_scanned"] += 1
                 continue
 
             search_query = _search_query_from_context(name, target_type, headline)
@@ -427,6 +456,14 @@ def run_tracker() -> None:
                 gnews_data      = fut_news_gen.result()
                 stocktwits_data = fut_stocktwits.result()
                 yahoo_data      = fut_yahoo.result()
+
+            for key, hit in (
+                ("hn", hn_data), ("reddit", reddit_data), ("google_news", news_data),
+                ("gnews_general", gnews_data), ("stocktwits", stocktwits_data),
+                ("yahoo_finance", yahoo_data),
+            ):
+                if hit:
+                    metrics["source_hits"][key] += 1
 
             combined_chatter = ""
             if hn_data:
@@ -451,12 +488,25 @@ def run_tracker() -> None:
                 bool(stocktwits_data), bool(yahoo_data), bool(gnews_data),
             )
 
+            # No community chatter does not mean no signal. The headline itself is
+            # market information ("Buffett steps down as chairman" needs no Reddit
+            # thread to be readable), and obscure products simply have no forum
+            # presence. Dropping these events left roughly a third of the feed with
+            # no score at all, so fall back to scoring the headline on its own and
+            # mark the row so headline-only readings stay distinguishable.
+            headline_only = False
             if not combined_chatter.strip():
+                if not headline or headline.strip() == "(general)":
+                    logger.info("   -> No chatter and no usable headline. Skipping.")
+                    continue
+                combined_chatter = f"[SOURCE: Headline] {headline}"
+                source_type = "headline_only"
+                headline_only = True
+                metrics["headline_only"] += 1
                 logger.info(
-                    "   -> No fresh chatter (hn=%s reddit=%s news=%s).",
+                    "   -> No fresh chatter (hn=%s reddit=%s news=%s) — scoring headline alone.",
                     bool(hn_data), bool(reddit_data), bool(news_data),
                 )
-                continue
 
             events_processed += 1
 
@@ -492,9 +542,18 @@ def run_tracker() -> None:
                         name,
                         headline[:40],
                     )
+                    metrics["skipped_duplicate"] += 1
                     continue
 
             tracking_context = headline
+            # With only a headline there is nothing to quote and no source to cite,
+            # so say so rather than letting the model invent either.
+            mode_note = (
+                "\nThere is no community chatter for this event, only the headline. "
+                "Judge it on the headline alone, leave verbatim_quotes and source_url "
+                "as empty strings, and keep the score conservative.\n"
+                if headline_only else ""
+            )
             prompt = f"""
 You are a Principal Market Intelligence Analyst.
 We are tracking: "{name}" in the context of: "{tracking_context}".
@@ -515,7 +574,7 @@ implication_tag rules:
 - opportunity: positive signal about a gap or weakness we could exploit
 - monitor: ambiguous/early signal worth watching but not yet actionable
 - no_action: neutral noise with no clear strategic implication
-
+{mode_note}
 Chatter data:
 {combined_chatter}
 """
@@ -574,15 +633,23 @@ Chatter data:
                         else:
                             supabase.table("sentiment").insert(insert_row).execute()
                             logger.info("   💾 SAVED NET-NEW INTELLIGENCE: %s [%s]", name, headline[:50])
+                        metrics["scored"] += 1
                 else:
                     logger.warning("   ⚠️ AI output format error for %s.", name)
+                    metrics["ai_errors"] += 1
             except Exception as e:
                 logger.error("⚠️ AI API Error: %s", e)
+                metrics["ai_errors"] += 1
 
             if REQUEST_DELAY_BETWEEN_TARGETS_SEC > 0:
                 time.sleep(REQUEST_DELAY_BETWEEN_TARGETS_SEC)
 
-    logger.info("Tracker run finished.")
+    logger.info(
+        "Tracker run finished. events_seen=%d scored=%d headline_only=%d duplicates=%d ai_errors=%d",
+        metrics["events_seen"], metrics["scored"], metrics["headline_only"],
+        metrics["skipped_duplicate"], metrics["ai_errors"],
+    )
+    return metrics
 
 
 if __name__ == "__main__":
@@ -591,5 +658,24 @@ if __name__ == "__main__":
 
     setup_logging()
     _configure_logging()  # no-op: setup_logging has already installed a handler
-    with step("tracker"):
-        run_tracker()
+    with step("tracker") as s:
+        m = run_tracker()
+        s.rows(m["scored"])
+        s.note(**m)
+
+        # Health rules. These exist because the pipeline reported success for
+        # months while StockTwits answered 403 to every call and a third of
+        # events were being dropped.
+        attempted = m["events_seen"] - m["skipped_stale"] - m["skipped_already_scanned"]
+        silent = [name for name, hits in m["source_hits"].items() if hits == 0]
+        if silent and attempted > 0:
+            s.degrade(f"sources returned nothing all run: {', '.join(sorted(silent))}")
+        s.check(attempted > 0 and m["scored"] == 0, "no sentiment written despite events to score")
+        s.check(
+            attempted >= 20 and m["headline_only"] / attempted > 0.5,
+            f"over half of readings came from headlines alone ({m['headline_only']}/{attempted})",
+        )
+        s.check(
+            attempted >= 10 and m["ai_errors"] / attempted > 0.2,
+            f"AI failed on {m['ai_errors']} of {attempted} events",
+        )

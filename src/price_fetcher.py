@@ -94,6 +94,7 @@ def run_price_fetcher():
     log.info("Fetching prices for %d unique tickers across %d targets", len(ticker_to_ids), len(targets))
 
     total_rows = 0
+    tickers_with_bars = 0
     for ticker, target_ids in ticker_to_ids.items():
         bars = _fetch_bars(ticker, LOOKBACK_DAYS)
         if not bars:
@@ -116,9 +117,17 @@ def run_price_fetcher():
                     log.error("  Upsert failed for %s (target %s): %s", ticker, tid, exc)
 
         log.info("  %s → %d bars × %d target(s) = %d rows upserted", ticker, len(bars), len(target_ids), rows_inserted)
+        if bars:
+            tickers_with_bars += 1
         total_rows += rows_inserted
 
     log.info("price_fetcher complete. Total rows upserted: %d", total_rows)
+    return {
+        "tickers": len(ticker_to_ids),
+        "targets": len(targets),
+        "tickers_with_bars": tickers_with_bars,
+        "rows_upserted": total_rows,
+    }
 
 
 if __name__ == "__main__":
@@ -126,5 +135,13 @@ if __name__ == "__main__":
     from pipeline_telemetry import step
 
     setup_logging()
-    with step("price_fetcher"):
-        run_price_fetcher()
+    with step("price_fetcher") as s:
+        m = run_price_fetcher()
+        s.rows(m["rows_upserted"])
+        s.note(**m)
+        # A ticker list that returns no bars at all means yfinance is refusing us,
+        # not that the market was quiet.
+        s.check(m["tickers"] > 0 and m["tickers_with_bars"] == 0,
+                "no price bars returned for any ticker")
+        s.check(m["tickers"] >= 20 and m["tickers_with_bars"] / m["tickers"] < 0.5,
+                f"only {m['tickers_with_bars']} of {m['tickers']} tickers returned bars")

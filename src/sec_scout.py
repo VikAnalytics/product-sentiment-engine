@@ -169,6 +169,7 @@ def run_sec_scout():
             total_new += 1
 
     log.info("sec_scout complete. New filing events: %d", total_new)
+    return {"tickers_checked": len(ticker_to_target), "filing_events_created": total_new}
 
 
 if __name__ == "__main__":
@@ -176,5 +177,7 @@ if __name__ == "__main__":
     from pipeline_telemetry import step
 
     setup_logging()
-    with step("sec_scout"):
-        run_sec_scout()
+    with step("sec_scout") as s:
+        m = run_sec_scout()
+        s.rows(m["filing_events_created"])
+        s.note(**m)

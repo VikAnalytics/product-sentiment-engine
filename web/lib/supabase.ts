@@ -126,6 +126,23 @@ export interface SimSnapshot {
   pnl_pct: number
   summary_text: string | null
   created_at: string
+  /** What the starting capital would be worth in this index from inception. Null before migration 021. */
+  spy_value: number | null
+  qqq_value: number | null
+}
+
+/** A retired simulator run, summarised when it was reset (migration 022). */
+export interface SimRun {
+  id: number
+  started_at: string
+  ended_at: string
+  starting_value: number
+  final_value: number
+  return_pct: number
+  spy_value: number | null
+  qqq_value: number | null
+  trades: number | null
+  note: string | null
 }
 
 // ── Query helpers ────────────────────────────────────────────────────────────
@@ -266,21 +283,18 @@ export async function fetchScoreSeries(targetId: number, days = 30): Promise<{ d
 }
 
 export async function fetchPriceSeries(targetId: number): Promise<StockPrice[]> {
+  // Newest bars first, no date filter: if the pipeline has paused, the chart still shows the last known window.
+  // 5-min bars run ~78 per trading day, so 6 pages of 1000 cover roughly 75 trading days.
+  const PAGES = 6
+  const results = await Promise.all(
+    Array.from({ length: PAGES }, (_, i) =>
+      supabase.from('stock_prices').select('ts, close').eq('target_id', targetId)
+        .order('ts', { ascending: false }).range(i * 1000, i * 1000 + 999)
+    )
+  )
   const all: StockPrice[] = []
-  let offset = 0
-  while (true) {
-    const { data, error } = await supabase
-      .from('stock_prices')
-      .select('*')
-      .eq('target_id', targetId)
-      .order('ts', { ascending: true })
-      .range(offset, offset + 999)
-    if (error || !data || data.length === 0) break
-    all.push(...data)
-    if (data.length < 1000) break
-    offset += 1000
-  }
-  return all
+  for (const { data } of results) if (data?.length) all.push(...(data as StockPrice[]))
+  return all.reverse()
 }
 
 export async function fetchAllTargetScores(): Promise<Record<number, { avg: number; count: number }>> {
@@ -308,6 +322,7 @@ export async function fetchSimData(): Promise<{
   pending: SimPending[]
   trades: SimTrade[]
   snapshots: SimSnapshot[]
+  previousRuns: SimRun[]
 }> {
   const [
     { data: portfolio },
@@ -315,12 +330,16 @@ export async function fetchSimData(): Promise<{
     { data: pending },
     { data: trades },
     { data: snapshots },
+    { data: previousRuns },
   ] = await Promise.all([
     supabase.from('sim_portfolio').select('*').single(),
     supabase.from('sim_holdings').select('*').order('ticker'),
     supabase.from('sim_pending_trades').select('*').order('queued_at', { ascending: false }),
     supabase.from('sim_trades').select('*').order('created_at', { ascending: false }).limit(50),
     supabase.from('sim_snapshots').select('*').order('snapshot_date'),
+    // sim_runs needs migration 022; treat its absence as "no earlier runs".
+    supabase.from('sim_runs').select('*').order('ended_at', { ascending: false }).limit(5)
+      .then(r => (r.error ? { data: [] } : r), () => ({ data: [] })),
   ])
   return {
     portfolio: portfolio ?? null,
@@ -328,28 +347,116 @@ export async function fetchSimData(): Promise<{
     pending: pending ?? [],
     trades: trades ?? [],
     snapshots: snapshots ?? [],
+    previousRuns: (previousRuns as SimRun[] | null) ?? [],
   }
 }
 
 export async function fetchLatestPricesForTickers(tickers: string[]): Promise<Record<string, number>> {
   if (tickers.length === 0) return {}
+  const { data: targetRows } = await supabase.from('targets').select('id, ticker').in('ticker', tickers)
+  const byTicker: Record<string, number> = {}
+  for (const t of targetRows ?? []) if (t.ticker && byTicker[t.ticker] == null) byTicker[t.ticker] = t.id
   const result: Record<string, number> = {}
-  for (const ticker of tickers) {
-    const { data: targetRows } = await supabase
-      .from('targets')
-      .select('id')
-      .eq('ticker', ticker)
-      .limit(1)
-    const targetId = targetRows?.[0]?.id
-    if (targetId == null) continue
-    const { data: priceRows } = await supabase
-      .from('stock_prices')
-      .select('close')
-      .eq('target_id', targetId)
-      .order('ts', { ascending: false })
-      .limit(1)
-    const close = priceRows?.[0]?.close
+  await Promise.all(Object.entries(byTicker).map(async ([ticker, targetId]) => {
+    const { data } = await supabase.from('stock_prices').select('close').eq('target_id', targetId).order('ts', { ascending: false }).limit(1)
+    const close = data?.[0]?.close
     if (close != null) result[ticker] = close
-  }
+  }))
   return result
+}
+
+// ── Added for the redesigned dashboard ───────────────────────────────────────
+
+export interface MacroTheme extends Target {
+  avg7d: number | null
+  readings7d: number
+  eventCount: number
+  exposures: { sector: string; weight: number }[]
+  latest: { id: number; headline: string; created_at: string }[]
+  series: { date: string; score: number }[]
+}
+
+/** Macro themes with 7-day sentiment, sector exposures, and latest headlines. */
+export async function fetchMacroThemes(): Promise<MacroTheme[]> {
+  const { data: macros, error } = await supabase.from('targets').select('*').eq('target_type', 'MACRO').eq('status', 'tracking').order('name')
+  if (error) throw error
+  const ids = (macros ?? []).map(m => m.id)
+  if (ids.length === 0) return []
+
+  const since7 = new Date(Date.now() - 7 * 86400e3).toISOString()
+  const since30 = new Date(Date.now() - 30 * 86400e3).toISOString()
+  const [{ data: exp }, { data: sent }, { data: evts }] = await Promise.all([
+    supabase.from('macro_sector_exposure').select('macro_target_id, sector, exposure_weight').in('macro_target_id', ids),
+    supabase.from('sentiment').select('target_id, sentiment_score, created_at').in('target_id', ids).gte('created_at', since30).not('sentiment_score', 'is', null).order('created_at'),
+    supabase.from('events').select('id, target_id, headline, created_at').in('target_id', ids).neq('headline', '(general)').order('created_at', { ascending: false }).limit(400),
+  ])
+
+  const expMap: Record<number, { sector: string; weight: number }[]> = {}
+  for (const r of exp ?? []) (expMap[r.macro_target_id] ??= []).push({ sector: r.sector, weight: Number(r.exposure_weight) })
+
+  const s7: Record<number, number[]> = {}
+  const daily: Record<number, Record<string, number[]>> = {}
+  for (const r of sent ?? []) {
+    if (r.created_at >= since7) (s7[r.target_id] ??= []).push(r.sentiment_score)
+    const d = r.created_at.slice(0, 10)
+    ;((daily[r.target_id] ??= {})[d] ??= []).push(r.sentiment_score)
+  }
+
+  const evMap: Record<number, { id: number; headline: string; created_at: string }[]> = {}
+  for (const e of evts ?? []) (evMap[e.target_id] ??= []).push({ id: e.id, headline: e.headline, created_at: e.created_at })
+
+  return (macros ?? []).map(m => {
+    const arr = s7[m.id] ?? []
+    const series = Object.entries(daily[m.id] ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([date, v]) => ({ date, score: v.reduce((a, b) => a + b, 0) / v.length }))
+    return {
+      ...m,
+      avg7d: arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null,
+      readings7d: arr.length,
+      eventCount: (evMap[m.id] ?? []).length,
+      exposures: (expMap[m.id] ?? []).sort((a, b) => b.weight - a.weight),
+      latest: (evMap[m.id] ?? []).slice(0, 3),
+      series,
+    }
+  })
+}
+
+/** Daily average score per target for several targets at once (for compare cards + rail sparklines). */
+export async function fetchScoreSeriesBatch(targetIds: number[], days = 30): Promise<Record<number, { date: string; score: number }[]>> {
+  if (targetIds.length === 0) return {}
+  const since = new Date(Date.now() - days * 86400e3).toISOString()
+  const rows: { target_id: number; created_at: string; sentiment_score: number }[] = []
+  let offset = 0
+  while (true) {
+    const { data, error } = await supabase
+      .from('sentiment').select('target_id, created_at, sentiment_score')
+      .in('target_id', targetIds).gte('created_at', since).not('sentiment_score', 'is', null)
+      .order('created_at').range(offset, offset + 999)
+    if (error || !data || data.length === 0) break
+    rows.push(...data)
+    if (data.length < 1000) break
+    offset += 1000
+  }
+  const grouped: Record<number, Record<string, number[]>> = {}
+  for (const r of rows) ((grouped[r.target_id] ??= {})[r.created_at.slice(0, 10)] ??= []).push(r.sentiment_score)
+  const out: Record<number, { date: string; score: number }[]> = {}
+  for (const [tid, days] of Object.entries(grouped)) {
+    out[Number(tid)] = Object.entries(days).sort(([a], [b]) => a.localeCompare(b)).map(([date, v]) => ({ date, score: Math.round(v.reduce((a, b) => a + b, 0) / v.length) }))
+  }
+  return out
+}
+
+/** Recent sentiment rows for a target: pros, cons, quotes, tags. Used by compare cards and deep-dive summaries. */
+export async function fetchRecentSentiment(targetId: number, limit = 12): Promise<SentimentRow[]> {
+  const { data } = await supabase
+    .from('sentiment').select('*').eq('target_id', targetId)
+    .order('created_at', { ascending: false }).limit(limit)
+  return data ?? []
+}
+
+/** Sentiment rows attached to one event (for the expanded event card). */
+export async function fetchEventSentiment(eventId: number): Promise<SentimentRow[]> {
+  const { data } = await supabase
+    .from('sentiment').select('*').eq('event_id', eventId)
+    .order('created_at', { ascending: false }).limit(20)
+  return data ?? []
 }

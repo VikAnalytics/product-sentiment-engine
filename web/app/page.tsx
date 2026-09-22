@@ -1,49 +1,79 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { fetchTargets, fetchAllTargetScores, Target } from '@/lib/supabase'
-import TopBar from '@/components/TopBar'
-import Sidebar from '@/components/Sidebar'
-import NewsFeed from '@/components/NewsFeed'
-import Analysis from '@/components/Analysis'
+import TopBar, { View, VIEWS } from '@/components/TopBar'
+import Feed from '@/components/Feed'
+import Companies from '@/components/Companies'
+import Macro from '@/components/Macro'
 import Simulator from '@/components/Simulator'
+import Brief from '@/components/Brief'
+import { ErrorState } from '@/components/ui'
 
-type View = 'feed' | 'analysis' | 'simulator'
+export type Scores = Record<number, { avg: number; count: number }>
+
+function parseHash(): { view: View; id: number | null } {
+  if (typeof window === 'undefined') return { view: 'feed', id: null }
+  const [v, id] = window.location.hash.replace(/^#\/?/, '').split('/')
+  const view = (VIEWS.find(x => x.key === v)?.key ?? 'feed') as View
+  return { view, id: id && /^\d+$/.test(id) ? Number(id) : null }
+}
 
 export default function Home() {
-  const [view, setView] = useState<View>('feed')
+  const [view, setViewState] = useState<View>('feed')
   const [targets, setTargets] = useState<Target[]>([])
-  const [scores, setScores] = useState<Record<number, { avg: number; count: number }>>({})
-  const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [scores, setScores] = useState<Scores>({})
+  const [selectedId, setSelectedIdState] = useState<number | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  // URL hash keeps view + selection shareable and survives reloads.
+  useEffect(() => {
+    const apply = () => { const h = parseHash(); setViewState(h.view); if (h.id != null) setSelectedIdState(h.id) }
+    apply()
+    window.addEventListener('hashchange', apply)
+    return () => window.removeEventListener('hashchange', apply)
+  }, [])
+
+  const setView = useCallback((v: View) => {
+    setViewState(v)
+    const id = v === 'companies' && selectedId != null ? `/${selectedId}` : ''
+    history.replaceState(null, '', `#${v}${id}`)
+  }, [selectedId])
+
+  const selectTarget = useCallback((id: number) => {
+    setSelectedIdState(id)
+    setViewState('companies')
+    history.replaceState(null, '', `#companies/${id}`)
+  }, [])
 
   useEffect(() => {
-    Promise.all([fetchTargets(), fetchAllTargetScores()]).then(([t, s]) => {
-      setTargets(t)
-      setScores(s)
-      // auto-select first company
-      const first = t.find(x => x.target_type === 'COMPANY')
-      if (first) setSelectedId(first.id)
-    })
+    Promise.all([fetchTargets(), fetchAllTargetScores()])
+      .then(([t, s]) => {
+        setTargets(t)
+        setScores(s)
+        setSelectedIdState(cur => {
+          if (cur != null) return cur
+          const ranked = t.filter(x => x.target_type === 'COMPANY').sort((a, b) => (s[b.id]?.avg ?? -99) - (s[a.id]?.avg ?? -99))
+          return ranked[0]?.id ?? null
+        })
+      })
+      .catch(e => setError(e?.message ?? String(e)))
   }, [])
 
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-      <TopBar />
-      <div style={{ display: 'flex', height: '100%', paddingTop: '48px' }}>
-        <Sidebar
-          view={view}
-          onViewChange={setView}
-          targets={targets}
-          scores={scores}
-          selectedId={selectedId}
-          onSelect={setSelectedId}
-        />
-        <main style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-          {view === 'feed' && <NewsFeed />}
-          {view === 'analysis' && <Analysis targetId={selectedId} />}
-          {view === 'simulator' && <Simulator />}
-        </main>
-      </div>
+    <div className="h-full flex flex-col">
+      <TopBar view={view} onViewChange={setView} targets={targets} scores={scores} onSelectTarget={selectTarget} />
+      <main className="flex-1 min-h-0 flex flex-col" style={{ paddingTop: 'var(--topbar-h)' }}>
+        {error ? <ErrorState message={error} /> : (
+          <>
+            {view === 'feed' && <Feed onSelectTarget={selectTarget} onOpenMacro={() => setView('macro')} />}
+            {view === 'companies' && <Companies targets={targets} scores={scores} selectedId={selectedId} onSelect={selectTarget} />}
+            {view === 'macro' && <Macro />}
+            {view === 'simulator' && <Simulator />}
+            {view === 'brief' && <Brief />}
+          </>
+        )}
+      </main>
     </div>
   )
 }

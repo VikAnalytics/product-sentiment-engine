@@ -36,6 +36,7 @@ import argparse
 import os
 import sys
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 
 _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _src = os.path.join(_root, "src")
@@ -54,7 +55,11 @@ MISMATCHED_TICKERS = {
     "Motorola": ("MSI", "MSI is Motorola Solutions; this target tracks Motorola Mobility phones (Lenovo)"),
 }
 
-PASSES = ("sentinels", "countries", "duplicates", "tickers")
+PASSES = ("sentinels", "countries", "duplicates", "tickers", "unsourced")
+
+# How far back the "unsourced" pass reaches. The web feed shows 48 hours, and
+# older paraphrase events are out of sight in per-target history.
+UNSOURCED_DAYS = 2
 
 
 def _load_targets(sb):
@@ -144,6 +149,42 @@ def clean_tickers(sb, targets, apply: bool) -> int:
     return fixed
 
 
+def clean_unsourced(sb, apply: bool, days: int) -> int:
+    """
+    Delete recent events that still hold a model paraphrase as their headline.
+
+    Their article was never stored, so there is nothing to restore them from —
+    they can only be removed or left to age out of the feed. Their sentiment
+    readings go too, which is the real cost: those are genuine scored data.
+    SEC filings are exempt; they have their own headline shape and were
+    repaired by scripts/backfill_sec_events.py.
+    """
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    rows = fetch_all_rows(
+        lambda: sb.table("events")
+        .select("id, headline, source_url, published_at")
+        .gte("published_at", since)
+        .order("id")
+    )
+    doomed = [r for r in rows if not r.get("source_url") and not (r["headline"] or "").startswith("[")]
+    readings = 0
+    for row in doomed:
+        readings += len(sb.table("sentiment").select("id").eq("event_id", row["id"]).execute().data or [])
+    print(f"\nunsourced: {len(doomed)} paraphrase event(s) in the last {days} day(s), "
+          f"carrying {readings} sentiment reading(s)")
+    for row in doomed[:8]:
+        print(f"  {'DELETE' if apply else 'would delete'} {row['id']} {row['headline'][:70]}")
+    if len(doomed) > 8:
+        print(f"  ... and {len(doomed) - 8} more")
+    if apply:
+        for row in doomed:
+            # sentiment.event_id is ON DELETE SET NULL, but a reading with no
+            # event is orphaned noise, so remove it with its event.
+            sb.table("sentiment").delete().eq("event_id", row["id"]).execute()
+            sb.table("events").delete().eq("id", row["id"]).execute()
+    return len(doomed)
+
+
 def report_generic_products(targets) -> None:
     """List only. Many of these are real products, and the guard is for new ones."""
     hits = []
@@ -165,9 +206,11 @@ def main() -> int:
     ap.add_argument("--apply", action="store_true", help="Write the changes (default: print only)")
     ap.add_argument("--only", choices=PASSES, action="append", default=[],
                     help="Run only this pass (repeatable)")
+    ap.add_argument("--days", type=int, default=UNSOURCED_DAYS,
+                    help=f"How far back the unsourced pass reaches (default: {UNSOURCED_DAYS})")
     args = ap.parse_args()
 
-    passes = args.only or list(PASSES)
+    passes = args.only or [p for p in PASSES if p != "unsourced"]
     sb = get_supabase()
     targets = _load_targets(sb)
     print(f"{len(targets)} targets loaded. Mode: {'APPLY' if args.apply else 'dry run'}")
@@ -181,6 +224,8 @@ def main() -> int:
         counts["duplicates"] = clean_duplicates(sb, targets, args.apply)
     if "tickers" in passes:
         counts["tickers"] = clean_tickers(sb, targets, args.apply)
+    if "unsourced" in passes:
+        counts["unsourced"] = clean_unsourced(sb, args.apply, args.days)
     report_generic_products(targets)
 
     print("\nSummary:", ", ".join(f"{k}={v}" for k, v in counts.items()) or "nothing selected")

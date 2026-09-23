@@ -269,3 +269,78 @@ input, select { font: inherit; color: inherit; }
 .prose-brief code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.86em; background: var(--raised); padding: 0.1em 0.35em; border-radius: 4px; }
 .prose-brief pre { background: var(--raised); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; overflow-x: auto; }
 }
+
+/* ─── Terminal (Companies) ───────────────────────────────────────────────────
+   The Companies view is a Bloomberg-style terminal: amber on true black,
+   monospaced, dense, keyboard-first. It does not follow the light/dark theme —
+   a terminal is a terminal — so its tokens are scoped to .term and never touch
+   the rest of the dashboard. True black, not a tinted near-black, because the
+   reference is a phosphor display and the tint would only soften it. */
+.term {
+  --t-bg:       #000000;
+  --t-rule:     #33281A;   /* amber-tinted hairline, the only structure */
+  --t-rule-lit: #5A4622;
+  --t-amber:    #FFA028;   /* primary text, 10.1:1 on black */
+  --t-dim:      #C98A2E;   /* secondary, 5.6:1 — still AA at 12px */
+  --t-faint:    #6E5524;   /* rules, disabled, row numbers */
+  --t-white:    #F2F2F2;   /* values that must win over the amber field */
+  --t-cyan:     #46C6FF;   /* column heads and anything actionable */
+  --t-pos:      #21D07A;
+  --t-neg:      #FF4C4C;
+
+  background: var(--t-bg);
+  color: var(--t-amber);
+  font-family: var(--font-plex-mono), ui-monospace, "SF Mono", Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 12.5px;
+  line-height: 1.45;
+  letter-spacing: 0.01em;
+}
+.term ::selection { background: var(--t-amber); color: var(--t-bg); }
+.term button { border-radius: 0; }
+.term input {
+  background: transparent;
+  border: 0;
+  outline: none;
+  color: var(--t-white);
+  font: inherit;
+  caret-color: var(--t-amber);
+}
+.term input::placeholder { color: var(--t-faint); }
+
+/* Column heads and the function bar are uppercase because that is how the
+   reference renders them, not as decoration. */
+.term-head {
+  color: var(--t-cyan);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+/* Selection is an inverse bar, the terminal's own highlight. */
+.term-row[aria-selected='true'] { background: var(--t-amber); color: var(--t-bg); }
+.term-row[aria-selected='true'] .term-dim,
+.term-row[aria-selected='true'] .term-white,
+.term-row[aria-selected='true'] .term-pos,
+.term-row[aria-selected='true'] .term-neg { color: var(--t-bg); }
+.term-row:hover:not([aria-selected='true']) { background: #141008; }
+.term-row:focus-visible { outline: 1px solid var(--t-cyan); outline-offset: -1px; }
+
+.term-dim   { color: var(--t-dim); }
+.term-faint { color: var(--t-faint); }
+.term-white { color: var(--t-white); }
+.term-pos   { color: var(--t-pos); }
+.term-neg   { color: var(--t-neg); }
+
+/* A block cursor that blinks at the command line. The only motion in the view. */
+.term-caret {
+  display: inline-block;
+  width: 0.62em;
+  height: 1.05em;
+  background: var(--t-amber);
+  vertical-align: text-bottom;
+  animation: term-blink 1.06s steps(1) infinite;
+}
+@keyframes term-blink { 0%, 50% { opacity: 1 } 50.01%, 100% { opacity: 0 } }
+@media (prefers-reduced-motion: reduce) { .term-caret { animation: none } }

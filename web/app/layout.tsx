@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from "next";
-import { Bricolage_Grotesque, DM_Sans } from "next/font/google";
+import { Bricolage_Grotesque, DM_Sans, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
 
 export const dynamic = 'force-dynamic'
@@ -15,6 +15,15 @@ const dmSans = DM_Sans({
   subsets: ["latin"],
   axes: ["opsz"],
   variable: "--font-dm",
+  display: "swap",
+});
+
+// The Companies terminal is monospaced end to end. Plex Mono for its 3270
+// mainframe lineage, and because it shares nothing with the display face.
+const plexMono = IBM_Plex_Mono({
+  subsets: ["latin"],
+  weight: ["400", "500", "600"],
+  variable: "--font-plex-mono",
   display: "swap",
 });
 
@@ -38,7 +47,7 @@ var t=(s==='light'||s==='dark')?s:(d?'dark':'light');document.documentElement.se
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className={`${bricolage.variable} ${dmSans.variable}`} suppressHydrationWarning>
+    <html lang="en" className={`${bricolage.variable} ${dmSans.variable} ${plexMono.variable}`} suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeInit }} />
       </head>

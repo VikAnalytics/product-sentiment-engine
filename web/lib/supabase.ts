@@ -320,22 +320,71 @@ export async function fetchPriceSeries(targetId: number): Promise<StockPrice[]> 
   return all.reverse()
 }
 
-export async function fetchAllTargetScores(): Promise<Record<number, { avg: number; count: number }>> {
-  const { data } = await supabase
-    .from('sentiment')
-    .select('target_id, sentiment_score')
-    .not('sentiment_score', 'is', null)
-  if (!data) return {}
-  const map: Record<number, number[]> = {}
-  for (const row of data) {
-    map[row.target_id] = map[row.target_id] ?? []
-    map[row.target_id].push(row.sentiment_score)
+export interface TargetScore {
+  /** Mean sentiment over the window, rounded — what the badges show. */
+  avg: number
+  /** Same mean to one decimal, for the terminal's columns. */
+  avg1: number
+  /** Readings in the window. */
+  count: number
+  /** Last 7 days against everything earlier in the window. Null without both sides. */
+  chg: number | null
+}
+
+/** How far back a "current" sentiment score looks. */
+const SCORE_WINDOW_DAYS = 30
+
+/**
+ * Sentiment per target over the last 30 days.
+ *
+ * Paged deliberately: PostgREST caps a response at 1000 rows, and this table
+ * holds 27,676 scored readings, so the unpaged version silently averaged an
+ * arbitrary thousand of them — every badge, ranking and comparison in the app
+ * was computed from that slice. Ordered by id so the pages cannot overlap or
+ * skip, which is the same trap the pipeline's fetch_all_rows hit.
+ */
+export async function fetchAllTargetScores(): Promise<Record<number, TargetScore>> {
+  const since = new Date(Date.now() - SCORE_WINDOW_DAYS * 86400e3).toISOString()
+  const since7 = new Date(Date.now() - 7 * 86400e3).toISOString()
+
+  const rows: { target_id: number; sentiment_score: number; created_at: string }[] = []
+  const PAGE = 1000
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase
+      .from('sentiment')
+      .select('target_id, sentiment_score, created_at')
+      .not('sentiment_score', 'is', null)
+      .gte('created_at', since)
+      .order('id')
+      .range(from, from + PAGE - 1)
+    if (error) throw error
+    rows.push(...(data ?? []))
+    if (!data || data.length < PAGE) break
   }
+
+  // Earlier is the rest of the window, not a strict 7-14 day slice: the pipeline
+  // was down from June to September, so a fixed prior week is usually empty and
+  // the column would read as "no change" when it means "nothing to compare".
+  const bucket: Record<number, { all: number[]; last7: number[]; earlier: number[] }> = {}
+  for (const row of rows) {
+    const b = (bucket[row.target_id] ??= { all: [], last7: [], earlier: [] })
+    b.all.push(row.sentiment_score)
+    if (row.created_at >= since7) b.last7.push(row.sentiment_score)
+    else b.earlier.push(row.sentiment_score)
+  }
+
+  const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length
   return Object.fromEntries(
-    Object.entries(map).map(([id, scores]) => [
-      id,
-      { avg: Math.round(scores.reduce((a, b) => a + b, 0) / scores.length), count: scores.length },
-    ])
+    Object.entries(bucket).map(([id, b]) => {
+      const avg = mean(b.all)
+      const chg = b.last7.length && b.earlier.length ? mean(b.last7) - mean(b.earlier) : null
+      return [id, {
+        avg: Math.round(avg),
+        avg1: Math.round(avg * 10) / 10,
+        count: b.all.length,
+        chg: chg == null ? null : Math.round(chg * 10) / 10,
+      }]
+    })
   )
 }
 

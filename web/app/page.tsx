@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { credentialsMissing, fetchTargets, fetchAllTargetScores, Target } from '@/lib/supabase'
+import { credentialsMissing, fetchTargets, fetchAllTargetScores, Target, TargetScore } from '@/lib/supabase'
 import TopBar, { View, VIEWS } from '@/components/TopBar'
 import Feed from '@/components/Feed'
 import Companies from '@/components/Companies'
@@ -10,7 +10,7 @@ import Simulator from '@/components/Simulator'
 import Brief from '@/components/Brief'
 import { ErrorState } from '@/components/ui'
 
-export type Scores = Record<number, { avg: number; count: number }>
+export type Scores = Record<number, TargetScore>
 
 function parseHash(): { view: View; id: number | null } {
   if (typeof window === 'undefined') return { view: 'feed', id: null }

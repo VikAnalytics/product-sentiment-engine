@@ -40,9 +40,11 @@ web/
 ├── components/
 │   ├── TopBar.tsx          Brand, primary nav, ⌘K search palette, theme toggle, live dot
 │   ├── Feed.tsx            Mood panel (ambient gradient = today's sentiment) + company / macro columns
-│   ├── Companies.tsx       Ranked rail (search, sector, F500, sort, compare picker) + main pane
-│   ├── DeepDive.tsx        Company hero, sentiment + price sparklines, expandable event rows
-│   ├── Compare.tsx         Up to four companies side by side
+│   ├── Companies.tsx       Terminal: command line, sortable screen, function keys (see below)
+│   ├── TerminalDetail.tsx  Security page — sentiment histogram, price line, hit rate, event ledger
+│   ├── TerminalCompare.tsx Up to four companies as terminal columns
+│   ├── DeepDive.tsx        Company hero, sentiment + price sparklines, expandable event rows (unused)
+│   ├── Compare.tsx         Up to four companies side by side (unused)
 │   ├── Macro.tsx           Macro themes with 7-day score, sector exposure bars, latest headlines
 │   ├── Simulator.tsx       Portfolio hero + growth chart vs SPY/QQQ, queue, holdings, trade log, strategy
 │   ├── Brief.tsx           Weekly and daily reports rendered from public/reports (react-markdown)
@@ -97,3 +99,29 @@ Motion: one load choreography per view (`.rise`, `.stagger`, mood bloom + drift,
 ## Deployment
 
 Auto-deploys from `main` via Vercel. See [docs/DEPLOY.md](../docs/DEPLOY.md) for full setup instructions.
+
+
+## The Companies terminal
+
+Companies is a Bloomberg-style terminal and deliberately ignores the light/dark
+theme: amber on true black, IBM Plex Mono throughout, no logos or rounded
+corners. Its tokens live under `.term` in `globals.css` and never leak into the
+other views, which keep the house style.
+
+| Key | Does |
+|-----|------|
+| `↑` `↓` | Move the cursor. The detail panel follows ~170ms behind, so holding a key does not fire a request per row. |
+| `PgUp` `PgDn` `Home` `End` | Jump. |
+| `/` | Focus the command line. Typing filters on ticker or name. |
+| `Esc` | Clear the filter. |
+| `Enter` | Open the detail (on mobile), or pick a company in compare mode. |
+| `F2` | Compare mode — pick two to four. |
+| `F3` | Fortune 500 only. |
+| `F4` | Cycle sector. |
+| `F5` | Scored-only (default on) vs every tracked company. |
+
+`F5` defaults to on because the pipeline stopped between 2026-06-10 and
+2026-09-19: only ~58 of 491 companies carry a reading inside the 30-day scoring
+window, and a screen of dashes says nothing while a stale score says something
+false. The `7D` column stays empty until the restarted pipeline has more than
+seven days of readings behind it.

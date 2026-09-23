@@ -7,7 +7,7 @@ import { Empty, Icon, Loading, Score, SectionHead, Segmented, Sparkline, TagChip
 import { TargetChips } from '@/components/Companies'
 import Logo from '@/components/Logo'
 
-type Ev = { id: number; headline: string; created_at: string; cached_analysis: string | null; avgScore: number | null; topTag: string | null; reaction: PriceReaction | null }
+type Ev = { id: number; headline: string; summary: string | null; source_url: string | null; published_at: string; created_at: string; cached_analysis: string | null; avgScore: number | null; topTag: string | null; reaction: PriceReaction | null }
 
 export default function DeepDive({ targetId, targets, onSelect }: { targetId: number | null; targets: Target[]; onSelect: (id: number) => void }) {
   const [target, setTarget] = useState<Target | null>(null)
@@ -181,10 +181,15 @@ function EventRow({ ev, open, onToggle }: { ev: Ev; open: boolean; onToggle: () 
     <li className="border-b border-line">
       <button onClick={onToggle} aria-expanded={open} className="w-full grid grid-cols-[72px_minmax(0,1fr)_auto] gap-4 py-3.5 pl-1 pr-1 text-left row-hover rounded-lg items-start">
         <span className="pt-0.5 border-l-2 pl-3" style={{ borderColor: rule }}>
-          <span className="block text-[13px] text-ink tnum">{fmtDate(ev.created_at)}</span>
-          <span className="block text-[11.5px] text-ink-3">{relativeTime(ev.created_at)}</span>
+          <span className="block text-[13px] text-ink tnum">{fmtDate(ev.published_at)}</span>
+          <span className="block text-[11.5px] text-ink-3">{relativeTime(ev.published_at)}</span>
         </span>
-        <span className="headline text-[16.5px] text-ink">{ev.headline}</span>
+        <span className="min-w-0">
+          <span className="headline block text-[16.5px] text-ink">{ev.headline}</span>
+          {ev.summary && ev.summary !== ev.headline && (
+            <span className="block text-[13px] text-ink-2 mt-1 leading-snug">{ev.summary}</span>
+          )}
+        </span>
         <span className="flex flex-col items-end gap-1.5 shrink-0">
           <Score value={ev.avgScore} size="md" />
           <TagChip tag={ev.topTag} />
@@ -194,6 +199,12 @@ function EventRow({ ev, open, onToggle }: { ev: Ev; open: boolean; onToggle: () 
 
       {open && (
         <div className="pl-[88px] pr-2 pb-5 rise">
+          {ev.source_url && (
+            <a href={ev.source_url} target="_blank" rel="noopener noreferrer"
+               className="inline-flex items-center gap-1.5 mb-3 text-[13px] text-accent hover:underline">
+              Read the original <Icon name="external" size={13} />
+            </a>
+          )}
           {r && r.price_at_event != null && (
             <div className="flex flex-wrap items-end gap-x-7 gap-y-2 mb-4 p-4 rounded-lg bg-raised">
               <Cell label={`${r.ticker} at event`} value={fmtUSD(r.price_at_event)} />

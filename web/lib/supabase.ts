@@ -25,7 +25,15 @@ export interface Target {
 export interface Event {
   id: number
   target_id: number
+  /** The publication's own headline. Rows written before migration 023 hold the model's paraphrase. */
   headline: string
+  /** One-sentence read of what the story means for this target. Null on pre-023 rows. */
+  summary: string | null
+  source_title: string | null
+  /** Link to the article or filing. Null on pre-023 rows. */
+  source_url: string | null
+  /** When the story was published. created_at is when the pipeline wrote the row. */
+  published_at: string
   cached_analysis: string | null
   created_at: string
 }
@@ -162,9 +170,12 @@ export async function fetchRecentHeadlines(lookbackHours = 48): Promise<(Event &
   const { data: events, error } = await supabase
     .from('events')
     .select('*, targets!inner(*)')
-    .gte('created_at', since)
+    // published_at is when the story broke; created_at is when the pipeline ran,
+    // which used to put every headline at 5pm ET regardless of the news.
+    .gte('published_at', since)
     .neq('headline', '(general)')
-    .order('created_at', { ascending: false })
+    .eq('targets.status', 'tracking')
+    .order('published_at', { ascending: false })
     .limit(200)
   if (error) throw error
 
@@ -218,7 +229,7 @@ export async function fetchRecentHeadlines(lookbackHours = 48): Promise<(Event &
 export async function fetchTargetWithEvents(targetId: number): Promise<{ target: Target; events: (Event & { reaction: PriceReaction | null; avgScore: number | null; topTag: string | null })[] }> {
   const [{ data: targetData }, { data: eventsData }] = await Promise.all([
     supabase.from('targets').select('*').eq('id', targetId).single(),
-    supabase.from('events').select('*').eq('target_id', targetId).order('created_at', { ascending: false }).limit(50),
+    supabase.from('events').select('*').eq('target_id', targetId).order('published_at', { ascending: false }).limit(50),
   ])
 
   if (!targetData) throw new Error('Target not found')
@@ -372,7 +383,7 @@ export interface MacroTheme extends Target {
   readings7d: number
   eventCount: number
   exposures: { sector: string; weight: number }[]
-  latest: { id: number; headline: string; created_at: string }[]
+  latest: { id: number; headline: string; published_at: string; source_url: string | null }[]
   series: { date: string; score: number }[]
 }
 
@@ -388,7 +399,7 @@ export async function fetchMacroThemes(): Promise<MacroTheme[]> {
   const [{ data: exp }, { data: sent }, { data: evts }] = await Promise.all([
     supabase.from('macro_sector_exposure').select('macro_target_id, sector, exposure_weight').in('macro_target_id', ids),
     supabase.from('sentiment').select('target_id, sentiment_score, created_at').in('target_id', ids).gte('created_at', since30).not('sentiment_score', 'is', null).order('created_at'),
-    supabase.from('events').select('id, target_id, headline, created_at').in('target_id', ids).neq('headline', '(general)').order('created_at', { ascending: false }).limit(400),
+    supabase.from('events').select('id, target_id, headline, source_url, published_at').in('target_id', ids).neq('headline', '(general)').order('published_at', { ascending: false }).limit(400),
   ])
 
   const expMap: Record<number, { sector: string; weight: number }[]> = {}
@@ -402,8 +413,8 @@ export async function fetchMacroThemes(): Promise<MacroTheme[]> {
     ;((daily[r.target_id] ??= {})[d] ??= []).push(r.sentiment_score)
   }
 
-  const evMap: Record<number, { id: number; headline: string; created_at: string }[]> = {}
-  for (const e of evts ?? []) (evMap[e.target_id] ??= []).push({ id: e.id, headline: e.headline, created_at: e.created_at })
+  const evMap: Record<number, { id: number; headline: string; published_at: string; source_url: string | null }[]> = {}
+  for (const e of evts ?? []) (evMap[e.target_id] ??= []).push({ id: e.id, headline: e.headline, published_at: e.published_at, source_url: e.source_url })
 
   return (macros ?? []).map(m => {
     const arr = s7[m.id] ?? []

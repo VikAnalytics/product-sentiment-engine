@@ -25,7 +25,7 @@ interface Group {
 function groupByDayAndCompany(items: Item[]): { date: string; groups: Group[] }[] {
   const days: Record<string, Record<string, Group>> = {}
   for (const it of items) {
-    const date = it.created_at.slice(0, 10)
+    const date = it.published_at.slice(0, 10)
     const t = it.target
     const parent = t?.target_type === 'PRODUCT' ? t.parent_target : null
     const key = parent ? `p${parent.id}` : `t${t?.id}`
@@ -33,13 +33,43 @@ function groupByDayAndCompany(items: Item[]): { date: string; groups: Group[] }[
       ? { id: parent.id, name: parent.name, logo_url: parent.logo_url, domain: parent.domain, sector: parent.sector ?? t?.sector ?? null, is_f500: parent.is_f500 ?? false, isMacro: false }
       : { id: t?.id ?? 0, name: t?.name ?? '—', logo_url: t?.logo_url ?? null, domain: t?.domain ?? null, sector: t?.sector ?? null, is_f500: t?.is_f500 ?? false, isMacro: t?.target_type === 'MACRO' }
     days[date] ??= {}
-    days[date][key] ??= { key, ...base, latestAt: it.created_at, events: [] }
+    days[date][key] ??= { key, ...base, latestAt: it.published_at, events: [] }
     days[date][key].events.push(it)
-    if (it.created_at > days[date][key].latestAt) days[date][key].latestAt = it.created_at
+    if (it.published_at > days[date][key].latestAt) days[date][key].latestAt = it.published_at
   }
   return Object.entries(days)
     .sort(([a], [b]) => b.localeCompare(a))
-    .map(([date, g]) => ({ date, groups: Object.values(g).sort((a, b) => b.latestAt.localeCompare(a.latestAt)) }))
+    .map(([date, g]) => ({
+      date,
+      groups: Object.values(g)
+        .map(group => ({ ...group, events: dedupeByStory(group.events) }))
+        .sort((a, b) => b.latestAt.localeCompare(a.latestAt)),
+    }))
+}
+
+/**
+ * One row per story. An article that names a company and its product is filed
+ * against both, so without this a card shows the same headline twice. Rows with
+ * no source_url predate migration 023 and cannot be matched, so they all stay.
+ */
+function dedupeByStory(events: Item[]): Item[] {
+  const seen = new Map<string, Item>()
+  const out: Item[] = []
+  for (const ev of events) {
+    if (!ev.source_url) { out.push(ev); continue }
+    const kept = seen.get(ev.source_url)
+    if (!kept) {
+      seen.set(ev.source_url, ev)
+      out.push(ev)
+      continue
+    }
+    // Keep whichever copy carries a reading, so the score survives the merge.
+    if (kept.topScore == null && ev.topScore != null) {
+      out[out.indexOf(kept)] = ev
+      seen.set(ev.source_url, ev)
+    }
+  }
+  return out
 }
 
 export default function Feed({ onSelectTarget, onOpenMacro }: { onSelectTarget: (id: number) => void; onOpenMacro: () => void }) {
@@ -61,7 +91,7 @@ export default function Feed({ onSelectTarget, onOpenMacro }: { onSelectTarget: 
   // Mood = the latest day with company signals.
   const mood = useMemo(() => {
     const latestDate = companyDays[0]?.date
-    const day = latestDate ? company.filter(i => i.created_at.slice(0, 10) === latestDate) : []
+    const day = latestDate ? company.filter(i => i.published_at.slice(0, 10) === latestDate) : []
     const scored = day.map(i => i.topScore).filter((s): s is number => s != null)
     const a = avg(scored)
     return {
@@ -70,7 +100,7 @@ export default function Feed({ onSelectTarget, onOpenMacro }: { onSelectTarget: 
       count: day.length,
       threats: day.filter(i => i.topTag === 'threat').length,
       opportunities: day.filter(i => i.topTag === 'opportunity').length,
-      macroCount: latestDate ? macro.filter(i => i.created_at.slice(0, 10) === latestDate).length : 0,
+      macroCount: latestDate ? macro.filter(i => i.published_at.slice(0, 10) === latestDate).length : 0,
     }
   }, [companyDays, company, macro])
 
@@ -176,17 +206,36 @@ function Column({ title, days, accent, empty, onOpen, macro = false }: {
                     {g.events.map(ev => {
                       const product = ev.target?.target_type === 'PRODUCT' ? ev.target.name : null
                       return (
-                        <li key={ev.id} className="border-t border-line">
+                        <li key={ev.id} className="border-t border-line relative">
                           <button onClick={() => onOpen(product ? ev.target.id : g.id)} className="w-full flex items-start gap-4 px-4 py-3 text-left row-hover">
                             <span className="flex-1 min-w-0">
                               {product && <span className="block text-[12px] font-medium text-accent mb-0.5">{product}</span>}
                               <span className="headline block text-[16px] text-ink">{ev.headline}</span>
+                              {/* The model's read of the story, under the publication's headline. */}
+                              {ev.summary && ev.summary !== ev.headline && (
+                                <span className="block text-[13px] text-ink-2 mt-1 leading-snug">{ev.summary}</span>
+                              )}
                             </span>
                             <span className="flex flex-col items-end gap-1.5 shrink-0 pt-0.5">
                               <Score value={ev.topScore} size="md" />
                               <TagChip tag={ev.topTag} />
+                              {/* Reserve the corner so the link never lands on the badges. */}
+                              {ev.source_url && <span className="h-[18px]" aria-hidden />}
                             </span>
                           </button>
+                          {ev.source_url && (
+                            <a
+                              href={ev.source_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              onClick={e => e.stopPropagation()}
+                              className="absolute bottom-2.5 right-3 text-ink-3 hover:text-accent transition-colors"
+                              title="Read the original"
+                              aria-label={`Read the original: ${ev.headline}`}
+                            >
+                              <Icon name="external" size={14} />
+                            </a>
+                          )}
                         </li>
                       )
                     })}

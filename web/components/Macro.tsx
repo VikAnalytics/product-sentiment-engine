@@ -83,8 +83,15 @@ export default function Macro() {
                       <ul className="m-0 p-0 list-none">
                         {t.latest.map(ev => (
                           <li key={ev.id} className="flex gap-3 py-1.5 text-[13.5px]">
-                            <span className="text-ink-3 shrink-0 w-12 tnum">{relativeTime(ev.created_at)}</span>
-                            <span className="headline text-ink">{ev.headline}</span>
+                            <span className="text-ink-3 shrink-0 w-12 tnum">{relativeTime(ev.published_at)}</span>
+                            {ev.source_url ? (
+                              <a href={ev.source_url} target="_blank" rel="noopener noreferrer"
+                                 className="headline text-ink hover:text-macro transition-colors">
+                                {ev.headline}
+                              </a>
+                            ) : (
+                              <span className="headline text-ink">{ev.headline}</span>
+                            )}
                           </li>
                         ))}
                       </ul>

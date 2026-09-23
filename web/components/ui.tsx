@@ -2,6 +2,7 @@
 
 import { CSSProperties, ReactNode, useId } from 'react'
 import { fmtScore, scoreTone, tagColor, tagLabel, toneColor } from '@/lib/utils'
+import { credentialsMissing } from '@/lib/supabase'
 
 /* ── Score figure ─────────────────────────────────────────────────────────── */
 
@@ -152,15 +153,22 @@ export function Loading({ label = 'Loading' }: { label?: string }) {
 }
 
 export function ErrorState({ message }: { message: string }) {
-  const paused = /failed to fetch|503|service unavailable/i.test(message)
+  // Check the build's credentials before blaming the database: without them
+  // every query fails with the same "failed to fetch" a paused project gives.
+  const unconfigured = credentialsMissing
+  const unreachable = !unconfigured && /failed to fetch|503|service unavailable/i.test(message)
   return (
     <div className="flex-1 flex items-center justify-center p-6">
       <div className="hero max-w-[46ch] p-5">
-        <div className="headline text-[17px] font-semibold text-ink">Could not load data</div>
+        <div className="headline text-[17px] font-semibold text-ink">
+          {unconfigured ? 'This build has no database credentials' : 'Could not load data'}
+        </div>
         <p className="mt-1.5 text-[13.5px] text-ink-2 m-0">
-          {paused
-            ? 'The database is not answering. If the Supabase project was paused for inactivity, restore it from the Supabase dashboard and reload.'
-            : message}
+          {unconfigured
+            ? 'NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY were missing when this was built, so every query fails. They are compiled in at build time, so adding them needs a redeploy — check that they cover the Preview environment, not just Production.'
+            : unreachable
+              ? 'The database is not answering. If the Supabase project was paused for inactivity, restore it from the Supabase dashboard and reload.'
+              : message}
         </p>
       </div>
     </div>

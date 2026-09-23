@@ -21,6 +21,7 @@ Six passes, each independently selectable:
               MSI, which is Motorola Solutions, the public-safety radio company —
               the target tracks Motorola Mobility phones, so the simulator could
               trade MSI on a phone launch.
+  parents     Products filed under the wrong company (Grok under SpaceX).
   products    A reviewed list of product targets that are descriptions rather
               than names ("AI Model", "New Treadmills"). Archived, not deleted,
               so their events survive on the parent company. Real products whose
@@ -96,7 +97,12 @@ ARCHIVE_PRODUCTS = {
     1169: "New Treadmills",
 }
 
-PASSES = ("sentinels", "countries", "duplicates", "tickers", "products", "unsourced")
+# Products filed under the wrong company. product name -> (wrong parent, right parent, why)
+MISPARENTED_PRODUCTS = {
+    "Grok platform": ("SpaceX", "xAI", "Grok is xAI's; SpaceX is a different Musk company"),
+}
+
+PASSES = ("sentinels", "countries", "duplicates", "tickers", "parents", "products", "unsourced")
 
 # How far back the "unsourced" pass reaches. The web feed shows 48 hours, and
 # older paraphrase events are out of sight in per-target history.
@@ -186,6 +192,31 @@ def clean_tickers(sb, targets, apply: bool) -> int:
               f"\n      {entry[1]}")
         if apply:
             sb.table("targets").update({"ticker": None}).eq("id", t["id"]).execute()
+        fixed += 1
+    return fixed
+
+
+def clean_parents(sb, targets, apply: bool) -> int:
+    """Repoint products filed under the wrong company."""
+    by_id = {t["id"]: t for t in targets}
+    by_name = {t["name"]: t for t in targets}
+    fixed = 0
+    print(f"\nparents: checking {len(MISPARENTED_PRODUCTS)} known mistake(s)")
+    for name, (wrong, right, why) in MISPARENTED_PRODUCTS.items():
+        target = by_name.get(name)
+        if not target:
+            continue
+        current = by_id.get(target["parent_target_id"] or -1)
+        correct = by_name.get(right)
+        if not correct or (current and current["name"] == right):
+            continue
+        if current and current["name"] != wrong:
+            print(f"  skip {target['id']} {name!r}: parent is {current['name']!r}, expected {wrong!r}")
+            continue
+        print(f"  {'REPOINT' if apply else 'would repoint'} {target['id']} {name!r}: "
+              f"{wrong} -> {right}\n      {why}")
+        if apply:
+            sb.table("targets").update({"parent_target_id": correct["id"]}).eq("id", target["id"]).execute()
         fixed += 1
     return fixed
 
@@ -290,6 +321,8 @@ def main() -> int:
         counts["duplicates"] = clean_duplicates(sb, targets, args.apply)
     if "tickers" in passes:
         counts["tickers"] = clean_tickers(sb, targets, args.apply)
+    if "parents" in passes:
+        counts["parents"] = clean_parents(sb, targets, args.apply)
     if "products" in passes:
         counts["products"] = clean_products(sb, targets, args.apply)
     if "unsourced" in passes:

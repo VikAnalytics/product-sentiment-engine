@@ -7,7 +7,7 @@ countries and central banks as companies, and a second "Meta Platforms" beside
 the existing "Meta". The tracker then searched HN, Reddit and Google News for
 each of them daily.
 
-Four passes, each independently selectable:
+Six passes, each independently selectable:
 
   sentinels   "None", "NONE" and friends. Target and its events are deleted —
               there is nothing to keep.
@@ -21,9 +21,12 @@ Four passes, each independently selectable:
               MSI, which is Motorola Solutions, the public-safety radio company —
               the target tracks Motorola Mobility phones, so the simulator could
               trade MSI on a phone launch.
-
-Generic product names ("Gemini app", "AI Model") are only listed, never touched:
-many are real products, and the guard that rejects them applies to new targets.
+  products    A reviewed list of product targets that are descriptions rather
+              than names ("AI Model", "New Treadmills"). Archived, not deleted,
+              so their events survive on the parent company. Real products whose
+              names end in a generic word ("Gemini app") were left alone.
+  unsourced   Recent events still holding a model paraphrase as their headline.
+              Deletes their sentiment readings too, so it is opt-in via --only.
 
 Read-only by default.
 
@@ -55,7 +58,45 @@ MISMATCHED_TICKERS = {
     "Motorola": ("MSI", "MSI is Motorola Solutions; this target tracks Motorola Mobility phones (Lenovo)"),
 }
 
-PASSES = ("sentinels", "countries", "duplicates", "tickers", "unsourced")
+# Product targets that are descriptions rather than product names, reviewed one
+# by one on 2026-09-23. Id and name must both match before anything is archived,
+# so a renamed or re-used id is skipped rather than silently retired. Real
+# products whose names merely end in a generic word — "Gemini app", "Fire TV app",
+# "Sport Open Earbuds" — were deliberately left tracking.
+ARCHIVE_PRODUCTS = {
+    198: "new AirTag",
+    306: "Starfield Free Lanes update",
+    321: "AI-powered social apps",
+    339: "Quick Resume feature update",
+    341: "‘Tasks’ app",
+    399: "Gemini features",
+    424: "Hollow Knight (update)",
+    453: "The White House App",
+    537: "AI dictation app",
+    548: "AI Model",
+    653: "Gemini AI app",
+    671: "Codex Update",
+    762: "ComfyUI Tools",
+    770: "Thus Chip",
+    788: "AI app",
+    792: "AI Agent Service",
+    796: "Vibe-coding app",
+    820: "AI Price History Feature",
+    822: "Rocket-Powered Car",
+    955: "Various AI Tools",
+    969: "AI song cover feature",
+    976: "Large Language Model",
+    978: "AI-powered tools",
+    979: "New all-electric Cadillac Vistiq",
+    1100: "Apple Intelligence Features",
+    1106: "AI Photo Editing Tools",
+    1162: "Smart Circuit Breaker",
+    1165: "Texture and Grain Controls",
+    1166: "New Fitness Tracker",
+    1169: "New Treadmills",
+}
+
+PASSES = ("sentinels", "countries", "duplicates", "tickers", "products", "unsourced")
 
 # How far back the "unsourced" pass reaches. The web feed shows 48 hours, and
 # older paraphrase events are out of sight in per-target history.
@@ -149,6 +190,31 @@ def clean_tickers(sb, targets, apply: bool) -> int:
     return fixed
 
 
+def clean_products(sb, targets, apply: bool) -> int:
+    """Archive the reviewed list of description-style product targets."""
+    by_id = {t["id"]: t for t in targets}
+    archived = skipped = 0
+    print(f"\nproducts: {len(ARCHIVE_PRODUCTS)} reviewed name(s)")
+    for tid, expected in ARCHIVE_PRODUCTS.items():
+        target = by_id.get(tid)
+        if not target or target["name"] != expected:
+            found = repr(target["name"]) if target else "nothing"
+            print(f"  skip {tid}: expected {expected!r}, found {found}")
+            skipped += 1
+            continue
+        if target["status"] != "tracking":
+            skipped += 1
+            continue
+        print(f"  {'ARCHIVE' if apply else 'would archive'} {tid} {target['name']!r} "
+              f"({_event_count(sb, tid)} event(s) kept)")
+        if apply:
+            sb.table("targets").update({"status": "archived"}).eq("id", tid).execute()
+        archived += 1
+    if skipped:
+        print(f"  {skipped} already archived, renamed or missing")
+    return archived
+
+
 def clean_unsourced(sb, apply: bool, days: int) -> int:
     """
     Delete recent events that still hold a model paraphrase as their headline.
@@ -224,6 +290,8 @@ def main() -> int:
         counts["duplicates"] = clean_duplicates(sb, targets, args.apply)
     if "tickers" in passes:
         counts["tickers"] = clean_tickers(sb, targets, args.apply)
+    if "products" in passes:
+        counts["products"] = clean_products(sb, targets, args.apply)
     if "unsourced" in passes:
         counts["unsourced"] = clean_unsourced(sb, args.apply, args.days)
     report_generic_products(targets)

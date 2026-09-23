@@ -3,8 +3,20 @@ import { createClient } from '@supabase/supabase-js'
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL ?? ''
 const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? ''
 
+/**
+ * True when the build had no Supabase credentials, so every query will fail.
+ *
+ * NEXT_PUBLIC_* values are compiled in, so this is decided at build time, not
+ * at run time. A preview deployment built without them reports exactly the same
+ * "failed to fetch" as a paused database — which is what it looked like when
+ * these variables turned out to be scoped to Production only.
+ */
+export const credentialsMissing = !url || !key
+
 // createClient throws if url is empty — guard for build-time SSR prerender
-export const supabase = url && key ? createClient(url, key) : createClient('https://placeholder.supabase.co', 'placeholder')
+export const supabase = credentialsMissing
+  ? createClient('https://placeholder.supabase.co', 'placeholder')
+  : createClient(url, key)
 
 // ── Types ────────────────────────────────────────────────────────────────────
 

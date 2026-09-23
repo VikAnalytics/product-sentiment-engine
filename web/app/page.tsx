@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { fetchTargets, fetchAllTargetScores, Target } from '@/lib/supabase'
+import { credentialsMissing, fetchTargets, fetchAllTargetScores, Target } from '@/lib/supabase'
 import TopBar, { View, VIEWS } from '@/components/TopBar'
 import Feed from '@/components/Feed'
 import Companies from '@/components/Companies'
@@ -47,6 +47,12 @@ export default function Home() {
   }, [])
 
   useEffect(() => {
+    // Without credentials every request goes to a placeholder host and hangs,
+    // leaving the page on "Loading signals" forever. Say so instead of waiting.
+    if (credentialsMissing) {
+      setError('This build has no Supabase credentials.')
+      return
+    }
     Promise.all([fetchTargets(), fetchAllTargetScores()])
       .then(([t, s]) => {
         setTargets(t)

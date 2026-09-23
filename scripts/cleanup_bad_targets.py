@@ -70,14 +70,22 @@ def _event_count(sb, target_id: int) -> int:
     return len(rows)
 
 
+def _sentiment_count(sb, target_id: int) -> int:
+    rows = sb.table("sentiment").select("id").eq("target_id", target_id).execute().data or []
+    return len(rows)
+
+
 def clean_sentinels(sb, targets, apply: bool) -> int:
     hits = [t for t in targets if (t["name"] or "").strip().lower() in JUNK_NAME_SENTINELS]
     print(f"\nsentinels: {len(hits)} target(s)")
     for t in hits:
-        events = _event_count(sb, t["id"])
+        events, readings = _event_count(sb, t["id"]), _sentiment_count(sb, t["id"])
         print(f"  {'DELETE' if apply else 'would delete'} {t['id']} {t['name']!r} "
-              f"[{t['target_type']}] and its {events} event(s)")
+              f"[{t['target_type']}], {events} event(s) and {readings} sentiment row(s)")
         if apply:
+            # The live FK on sentiment.target_id does not cascade, whatever
+            # migration 000 says, so clear the children in dependency order.
+            sb.table("sentiment").delete().eq("target_id", t["id"]).execute()
             sb.table("events").delete().eq("target_id", t["id"]).execute()
             sb.table("targets").delete().eq("id", t["id"]).execute()
     return len(hits)

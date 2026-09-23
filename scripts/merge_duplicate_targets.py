@@ -13,6 +13,30 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from config import get_supabase
 
 
+def _drop_events_the_keeper_already_has(supabase, keep_id: int, merge_id: int) -> None:
+    """Delete the loser's events whose source_url the keeper already holds."""
+    try:
+        keep_urls = {
+            r["source_url"] for r in
+            (supabase.table("events").select("source_url").eq("target_id", keep_id).execute().data or [])
+            if r.get("source_url")
+        }
+        if not keep_urls:
+            return
+        doomed = [
+            r["id"] for r in
+            (supabase.table("events").select("id, source_url").eq("target_id", merge_id).execute().data or [])
+            if r.get("source_url") in keep_urls
+        ]
+        for event_id in doomed:
+            supabase.table("events").delete().eq("id", event_id).execute()
+        if doomed:
+            print(f"  Dropped {len(doomed)} duplicate event(s) already held by {keep_id}")
+    except Exception as exc:
+        # Pre-023 database: no source_url column, so no collision to avoid.
+        print(f"  (skipped source_url de-dup: {exc})")
+
+
 def merge_into(supabase, keep_id: int, merge_id: int, dry_run: bool) -> None:
     """Reassign merge_id's data to keep_id, then delete merge_id target."""
     if keep_id == merge_id:
@@ -28,6 +52,10 @@ def merge_into(supabase, keep_id: int, merge_id: int, dry_run: bool) -> None:
         print(f"  Would merge {merge_id!r} ({merge_name}) into {keep_id!r} ({keep_name})")
         return
 
+    # 0) Both targets may hold the same story, and events is unique on
+    # (target_id, source_url) since migration 023, so reassigning would collide.
+    # The keeper's copy wins.
+    _drop_events_the_keeper_already_has(supabase, keep_id, merge_id)
     # 1) events: target_id merge_id -> keep_id
     supabase.table("events").update({"target_id": keep_id}).eq("target_id", merge_id).execute()
     # 2) sentiment: target_id merge_id -> keep_id

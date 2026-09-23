@@ -26,6 +26,21 @@ class TestNormalizeTargetName:
     def test_collapses_whitespace(self):
         assert normalize_target_name("  Hello   World  ") == "hello world"
 
+    def test_strips_corporate_suffix(self):
+        assert normalize_target_name("Meta Platforms") == normalize_target_name("Meta")
+        assert normalize_target_name("Alphabet Inc.") == normalize_target_name("Alphabet")
+        assert normalize_target_name("Cisco Systems") == normalize_target_name("Cisco")
+
+    def test_strips_stacked_suffixes(self):
+        assert normalize_target_name("Prosus Holdings Group") == "prosus"
+
+    def test_keeps_suffix_when_it_is_the_whole_name(self):
+        assert normalize_target_name("Group") == "group"
+
+    def test_only_trailing_suffixes_are_stripped(self):
+        # "Group 1 Automotive" is a real dealership chain, not "1 Automotive".
+        assert normalize_target_name("Group 1 Automotive") == "1 automotive group"
+
 
 class TestGuessDomain:
     def test_basic(self):

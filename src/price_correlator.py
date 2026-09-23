@@ -21,7 +21,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
 from zoneinfo import ZoneInfo
 
-from config import get_supabase
+from config import fetch_all_rows, get_supabase
+from events import event_time, sort_by_event_time
 
 logging.basicConfig(
     level=getattr(logging, os.getenv("LOG_LEVEL", "INFO"), logging.INFO),
@@ -103,6 +104,48 @@ def _day_close(bars: list[dict], ref_ts: datetime, offset_days: int) -> Optional
     return float(max(day_bars, key=lambda b: b["ts"])["close"])
 
 
+def _drop_stale_reaction(sb, event_id: int) -> int:
+    """Remove a stored reaction for an event that can no longer be priced."""
+    existing = sb.table("price_reactions").select("id").eq("event_id", event_id).limit(1).execute().data or []
+    if not existing:
+        return 0
+    sb.table("price_reactions").delete().eq("event_id", event_id).execute()
+    return 1
+
+
+def sweep_stale_reactions(sb) -> int:
+    """
+    Delete reactions whose stored session no longer matches their event's time.
+
+    A reaction is attribution for a moment, so when that moment changes the
+    number stops meaning anything. Repairing the SEC filings' timestamps
+    (migration 023) left 177 rows claiming 'regular' at high confidence for
+    filings that had moved to after hours, and the per-target loop below could
+    not reach them: it only looks back 67 days, and those events are older.
+
+    Anything still priceable is recomputed by this run; the rest is removed
+    rather than left showing a number from the wrong window.
+    """
+    rows = fetch_all_rows(
+        lambda: sb.table("price_reactions")
+        .select("event_id, market_session, events!event_id(published_at, created_at)")
+        .order("event_id")
+    )
+    stale = []
+    for row in rows:
+        event = row.get("events") or {}
+        happened = event_time(event)
+        if happened is None:
+            continue
+        if _market_session(happened) != row["market_session"]:
+            stale.append(row["event_id"])
+    for event_id in stale:
+        sb.table("price_reactions").delete().eq("event_id", event_id).execute()
+    if stale:
+        log.info("Removed %d stale reaction(s) whose event time had changed", len(stale))
+    return len(stale)
+
+
 def _fetch_bars_paginated(sb, target_id: int) -> list[dict]:
     """Fetch all 5-min bars for a target, paginating past Supabase's 1000-row limit."""
     all_bars = []
@@ -141,23 +184,28 @@ def run_correlator():
 
     log.info("Computing price reactions for %d public targets", len(targets))
     total_written = 0
+    total_removed = sweep_stale_reactions(sb)
 
     for target in targets:
         tid = target["id"]
         name = target["name"]
         ticker = target["ticker"]
 
-        # Load events for this target (last 60 days), sorted ascending
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+        # Load events for this target (last 60 days), ordered by when the news
+        # broke. The database filter stays on created_at, which every row has;
+        # publish time can precede ingest by a day, so the window is widened and
+        # the exact ordering done here.
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=67)).isoformat()
         events = (
             sb.table("events")
-            .select("id, headline, created_at")
+            .select("*")
             .eq("target_id", tid)
             .gte("created_at", cutoff)
             .order("created_at", desc=False)
             .execute()
             .data
         )
+        events = sort_by_event_time(events or [])
         if not events:
             continue
 
@@ -167,10 +215,12 @@ def run_correlator():
             log.warning("No price bars for %s (%s)", name, ticker)
             continue
 
-        written = 0
+        written = removed = 0
         for i, event in enumerate(events):
             try:
-                event_ts = (_parse_ts(event["created_at"].replace("Z", "+00:00")))
+                event_ts = event_time(event)
+                if event_ts is None:
+                    continue
                 session = _market_session(event_ts)
 
                 # For after-hours/premarket: shift attribution to next market open
@@ -187,6 +237,12 @@ def run_correlator():
 
                 price_at_event, _ = _nearest_close(bars, ref_ts)
                 if price_at_event is None:
+                    # No bar near this event, so nothing can be attributed to it.
+                    # Any row already stored was computed from a different
+                    # timestamp — 177 survived the migration 023 backfill, still
+                    # claiming 'regular' at high confidence for filings that had
+                    # moved to after hours. An absent badge beats a wrong one.
+                    removed += _drop_stale_reaction(sb, event["id"])
                     continue
 
                 # Inter-event window: price at next event for this target
@@ -196,7 +252,7 @@ def run_correlator():
                 next_event_id = None
 
                 if next_event:
-                    next_ts = (_parse_ts(next_event["created_at"].replace("Z", "+00:00")))
+                    next_ts = event_time(next_event) or event_ts
                     # Only use inter-event window if same trading day
                     if next_ts.astimezone(ET).date() == event_ts.astimezone(ET).date():
                         window_end_price, _ = _nearest_close(bars, next_ts)
@@ -226,7 +282,7 @@ def run_correlator():
                 nearby = [
                     e for e in events
                     if e["id"] != event["id"]
-                    and abs(((_parse_ts(e["created_at"].replace("Z", "+00:00"))) - event_ts).total_seconds()) < 10800
+                    and abs(((event_time(e) or event_ts) - event_ts).total_seconds()) < 10800
                 ]
                 if len(nearby) == 0:
                     confidence = "high"
@@ -259,12 +315,15 @@ def run_correlator():
             except Exception as exc:
                 log.error("Error processing event %s for %s: %s", event["id"], name, exc)
 
-        if written:
-            log.info("  %s (%s) → %d price reactions computed", name, ticker, written)
+        if written or removed:
+            log.info("  %s (%s) → %d price reactions computed, %d stale removed", name, ticker, written, removed)
         total_written += written
+        total_removed += removed
 
-    log.info("price_correlator complete. Total reactions written: %d", total_written)
-    return {"public_targets": len(targets), "reactions_written": total_written}
+    log.info("price_correlator complete. Total reactions written: %d, stale removed: %d",
+             total_written, total_removed)
+    return {"public_targets": len(targets), "reactions_written": total_written,
+            "reactions_removed": total_removed}
 
 
 if __name__ == "__main__":

@@ -78,6 +78,7 @@ RSS Feeds + SEC EDGAR
 | `src/price_fetcher.py` | Fetch 5-min OHLCV bars via yfinance → stock_prices table |
 | `src/price_correlator.py` | Inter-event price attribution → price_reactions table |
 | `src/sim_trader.py` | AI stock simulator: execute/analyze/snapshot/diagnose (six-factor quant strategy) |
+| `src/events.py` | Reading event rows: `event_time()` prefers `published_at`, falls back to `created_at` |
 | `src/logging_setup.py` | Root-logger setup: JSON when `GITHUB_ACTIONS=true`, plain locally (idempotent) |
 | `src/pipeline_telemetry.py` | `step()` context manager — writes start/duration/status/rows to `pipeline_runs` |
 | `supabase/migrations/` | Schema evolution (run 000 → 018 in order) |
@@ -91,7 +92,11 @@ RSS Feeds + SEC EDGAR
 ## Database Schema (Supabase)
 
 - **targets**: Companies/products (`id`, `name`, `target_type`, `description`, `status`, `logo_url`, `domain`, `parent_target_id`, `ticker`, `sector`, `is_f500`)
-- **events**: News events per target (`id`, `target_id`, `headline`, `created_at`, `cached_analysis`)
+- **events**: News events per target (`id`, `target_id`, `headline`, `summary`, `source_title`, `source_url`, `published_at`, `created_at`, `cached_analysis`)
+  - `headline`: the publication's own headline. Rows written before migration 023 hold the model's paraphrase instead
+  - `summary`: the extraction model's one-sentence read of what the article means for this target
+  - `published_at`: when the article or filing went out. `created_at` is when the row was written — use `published_at` for anything that means "when did this news happen"
+  - Unique on `(target_id, source_url)` where `source_url` is not null: one story per target
 - **sentiment**: Sentiment rows with embeddings (`id`, `target_id`, `event_id`, `pros`, `cons`, `verbatim_quotes`, `source_url`, `embedding vector(768)`, `sentiment_score SMALLINT`, `created_at`)
   - `sentiment_score`: AI-assigned score from -10 (very negative) to +10 (very positive); NULL for rows before migration 008
 - **target_sentiment_summary**: AI-consolidated per-target summary (one row per target)
@@ -215,6 +220,7 @@ REPORT_EVENT_MAX_AGE_DAYS = 3  # Only include events created within last 3 days 
 | `backfill_sim_benchmarks.py` | Fill SPY/QQQ values onto existing `sim_snapshots` rows (needs migration 021). `--dry-run` / `--force` |
 | `record_previous_run.py` | Write a `sim_runs` summary for a run retired before migration 022 existed. `--dry-run` |
 | `backtest.py` | Replay the simulator strategy over history against SPY/QQQ. `--start/--end`, `--set NAME=VALUE`, `--sweep NAME=v1,v2` |
+| `cleanup_bad_targets.py` | Retire targets the scout should not have created: sentinels, countries as companies, duplicate names, wrong tickers. `--apply` / `--only` |
 | `test_supabase_key.py` | Validate DB connection |
 
 ---
@@ -504,3 +510,8 @@ US-China Trade Tensions · Russia-Ukraine Conflict · Middle East Tensions · Se
 - **The analyze funnel is recorded, not just printed**: `run_analyze` returns the stage counts and a `stopped_at` naming the gate that emptied the run, and the step degrades when it queues nothing. Idle capital is the simulator's largest drag — it sat ~92% cash from 2026-06-12 onward.
 - **Telemetry measures output, not just survival**: every step returns a metrics dict; the call site passes it to `s.rows()` / `s.note()` and calls `s.check(condition, reason)` to mark a run `degraded`. Needs migration 020 for the status value; without it the helper falls back to `success` carrying the reason. All 601 runs before this recorded `success` while sources were dead.
 - **Telemetry is best-effort**: never wrap the telemetry call site in additional `try/except` — the helper already swallows all exceptions internally. Let it fail silently if the table is missing.
+- **An event keeps its article** (migration 023): `headline` is the publication's headline, `summary` is the model's read of it, `source_url` is the link and the dedupe key, `published_at` is when it went out. Scout used to store the paraphrase as the headline and discard title, link and time, which editorialised the feed, left nothing to click, and broke idempotency — a paraphrase differs every run, so the same story re-entered daily (39 near-duplicate pairs in 14 days). The extraction prompt now numbers the articles and each line cites one; `_cites_its_article()` checks the line against that article and drops only the link on a mismatch, because over a 160-article batch the numbering drifts and a wrong number would staple a real headline onto an unrelated summary.
+- **Read `published_at`, not `created_at`, for news time**: `created_at` is when the row was written. Every RSS event used to carry the 21:03 UTC pipeline run time, which is 17:03 ET — after the close, outside `MAX_BAR_LAG_MINUTES=10` of any bar — so `price_correlator` wrote nothing and today's headlines only got a price reaction the next day. Use `event_time()` / `within_age()` from `src/events.py`; they fall back to `created_at` so a pre-023 database still runs.
+- **Name guards run only where a target would be created** (`scout._is_junk_name`): every name the model produced used to become a permanently tracked target the tracker then searched for daily — "New Fitness Tracker", "Texture and Grain Controls", a COMPANY named "None", and Germany, NATO and the Houthis as companies. Sentinels, descriptions posing as product names, and countries/blocs/central banks as companies are refused. Existing targets always keep receiving events, so tightening a rule can never orphan them. `scripts/cleanup_bad_targets.py` handles what is already stored.
+- **EDGAR gives an acceptance time and item codes; use both**: `sec_scout` stamped `filing_date + "T16:30:00Z"` with a comment saying "after market close", but that is 12:30 ET — mid-session — so every filing was credited with the midday-to-close move at `confidence='high'`. `acceptanceDateTime` sits in the same payload (News Corp's 2026-09-22 8-K was accepted 2026-09-21T20:23:10Z). `items` too: News Corp files a routine Item 8.01 nearly every business day, and it read exactly like an earnings 8-K until the headline named the item.
+- **A bare NONE from the extraction call is a bad response, not a quiet news day**: it costs a whole run, and it happened on 2026-09-23 with 160 relevant articles queued. Scout retries once. `SCOUT_DRY_RUN=1` runs the entire path — feeds, model, guards — writing nothing, which is how to check prompt changes before they reach the database.

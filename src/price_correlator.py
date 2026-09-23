@@ -22,6 +22,7 @@ from typing import Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from config import get_supabase
+from events import event_time, sort_by_event_time
 
 logging.basicConfig(
     level=getattr(logging, os.getenv("LOG_LEVEL", "INFO"), logging.INFO),
@@ -147,17 +148,21 @@ def run_correlator():
         name = target["name"]
         ticker = target["ticker"]
 
-        # Load events for this target (last 60 days), sorted ascending
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+        # Load events for this target (last 60 days), ordered by when the news
+        # broke. The database filter stays on created_at, which every row has;
+        # publish time can precede ingest by a day, so the window is widened and
+        # the exact ordering done here.
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=67)).isoformat()
         events = (
             sb.table("events")
-            .select("id, headline, created_at")
+            .select("*")
             .eq("target_id", tid)
             .gte("created_at", cutoff)
             .order("created_at", desc=False)
             .execute()
             .data
         )
+        events = sort_by_event_time(events or [])
         if not events:
             continue
 
@@ -170,7 +175,9 @@ def run_correlator():
         written = 0
         for i, event in enumerate(events):
             try:
-                event_ts = (_parse_ts(event["created_at"].replace("Z", "+00:00")))
+                event_ts = event_time(event)
+                if event_ts is None:
+                    continue
                 session = _market_session(event_ts)
 
                 # For after-hours/premarket: shift attribution to next market open
@@ -196,7 +203,7 @@ def run_correlator():
                 next_event_id = None
 
                 if next_event:
-                    next_ts = (_parse_ts(next_event["created_at"].replace("Z", "+00:00")))
+                    next_ts = event_time(next_event) or event_ts
                     # Only use inter-event window if same trading day
                     if next_ts.astimezone(ET).date() == event_ts.astimezone(ET).date():
                         window_end_price, _ = _nearest_close(bars, next_ts)
@@ -226,7 +233,7 @@ def run_correlator():
                 nearby = [
                     e for e in events
                     if e["id"] != event["id"]
-                    and abs(((_parse_ts(e["created_at"].replace("Z", "+00:00"))) - event_ts).total_seconds()) < 10800
+                    and abs(((event_time(e) or event_ts) - event_ts).total_seconds()) < 10800
                 ]
                 if len(nearby) == 0:
                     confidence = "high"

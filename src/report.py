@@ -6,7 +6,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # Allow importing config when running as python src/report.py from repo root
 _src_dir = os.path.dirname(os.path.abspath(__file__))
@@ -17,6 +17,7 @@ from config import (
     get_supabase, get_model, fetch_all_rows,
     LOOKBACK_DAYS, MAX_PAYLOAD_CHARS_PER_FIELD, REPORT_EVENT_MAX_AGE_DAYS,
 )
+from events import within_age
 from sentiment_dedupe import normalize_for_dedupe
 
 logger = logging.getLogger(__name__)
@@ -71,8 +72,10 @@ def get_cloud_data():
 
     yesterday_dt = datetime.utcnow() - timedelta(days=LOOKBACK_DAYS)
     yesterday_str = yesterday_dt.isoformat()
-    event_cutoff_dt = datetime.utcnow() - timedelta(days=REPORT_EVENT_MAX_AGE_DAYS)
-    event_cutoff_str = event_cutoff_dt.isoformat()
+    event_cutoff_dt = datetime.now(timezone.utc) - timedelta(days=REPORT_EVENT_MAX_AGE_DAYS)
+    # Widened for the database filter only: created_at is when the row was written,
+    # which can trail publication by a day. within_age() then cuts on publish time.
+    event_cutoff_str = (event_cutoff_dt - timedelta(days=2)).isoformat()
     full_data = []
 
     for t in targets:
@@ -86,7 +89,7 @@ def get_cloud_data():
         # This prevents old events (e.g. March 7) from resurfacing in today's report just because
         # the tracker wrote fresh sentiment rows for them.
         events_resp = supabase.table("events").select("*").eq("target_id", t_id).gte("created_at", event_cutoff_str).execute()
-        events_list = getattr(events_resp, "data", None) or []
+        events_list = [e for e in (getattr(events_resp, "data", None) or []) if within_age(e, event_cutoff_dt)]
         if not events_list:
             events_list = [{"id": None, "headline": t.get("description") or ""}]
 

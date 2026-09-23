@@ -7,7 +7,7 @@ import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 
@@ -33,6 +33,7 @@ from config import (
     fetch_all_rows,
     HTTP_USER_AGENT,
 )
+from events import event_time_iso, sort_by_event_time, within_age
 
 logger = logging.getLogger(__name__)
 
@@ -402,8 +403,10 @@ def run_tracker() -> dict:
         events_list = getattr(events_resp, "data", None) or []
         if not events_list:
             events_list = [{"id": None, "headline": (t.get("description") or "").strip() or "(general)"}]
+        # Newest news first, by when it broke rather than when it was ingested.
+        events_list = sort_by_event_time(events_list, reverse=True)
 
-        cutoff_dt = datetime.utcnow() - timedelta(days=EVENT_MAX_AGE_DAYS)
+        cutoff_dt = datetime.now(timezone.utc) - timedelta(days=EVENT_MAX_AGE_DAYS)
 
         for event in events_list:
             if max_events and events_processed >= max_events:
@@ -414,17 +417,13 @@ def run_tracker() -> dict:
             event_id = event.get("id")
             headline = (event.get("headline") or "").strip() or "(general)"
 
-            # E: skip events older than EVENT_MAX_AGE_DAYS (avoids dead HTTP calls on stale news)
-            raw_created = event.get("created_at") or ""
-            if raw_created and event_id is not None:
-                try:
-                    event_dt = datetime.fromisoformat(raw_created.replace("Z", "+00:00")).replace(tzinfo=None)
-                    if event_dt < cutoff_dt:
-                        logger.debug("   -> Event too old (%s), skipping: %s [%s]", raw_created[:10], name, headline[:40])
-                        metrics["skipped_stale"] += 1
-                        continue
-                except ValueError:
-                    pass
+            # E: skip events older than EVENT_MAX_AGE_DAYS (avoids dead HTTP calls on stale news).
+            # Measured from publication, so a late-ingested story is judged by its own age.
+            if event_id is not None and not within_age(event, cutoff_dt):
+                logger.debug("   -> Event too old (%s), skipping: %s [%s]",
+                             event_time_iso(event)[:10], name, headline[:40])
+                metrics["skipped_stale"] += 1
+                continue
 
             # Daily idempotency per event
             existing_q = supabase.table("sentiment").select("id").eq("target_id", t_id).gte("created_at", today_str)

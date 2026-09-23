@@ -1,0 +1,185 @@
+"""
+Clean up targets the scout should never have created.
+
+Before the name guards in scout._is_junk_name, every name the extraction model
+produced became a permanently tracked target: a COMPANY literally named "None",
+countries and central banks as companies, and a second "Meta Platforms" beside
+the existing "Meta". The tracker then searched HN, Reddit and Google News for
+each of them daily.
+
+Four passes, each independently selectable:
+
+  sentinels   "None", "NONE" and friends. Target and its events are deleted —
+              there is nothing to keep.
+  countries   Countries, blocs, central banks and armed groups held as COMPANY.
+              Retired (status='archived'), not deleted: their events are real
+              news, and archiving keeps them out of the tracker and the report.
+  duplicates  Targets whose normalized names now collide — "Chevron Corporation"
+              onto "Chevron". Merged with scripts/merge_duplicate_targets.merge_into,
+              keeping the row that has a ticker.
+  tickers     Tickers known to point at the wrong company. "Motorola" carries
+              MSI, which is Motorola Solutions, the public-safety radio company —
+              the target tracks Motorola Mobility phones, so the simulator could
+              trade MSI on a phone launch.
+
+Generic product names ("Gemini app", "AI Model") are only listed, never touched:
+many are real products, and the guard that rejects them applies to new targets.
+
+Read-only by default.
+
+Usage:
+    PYTHONPATH=src python scripts/cleanup_bad_targets.py
+    PYTHONPATH=src python scripts/cleanup_bad_targets.py --apply
+    PYTHONPATH=src python scripts/cleanup_bad_targets.py --only duplicates --apply
+"""
+import argparse
+import os
+import sys
+from collections import defaultdict
+
+_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_src = os.path.join(_root, "src")
+for _p in (_root, _src):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from config import get_supabase, fetch_all_rows  # noqa: E402
+from normalize import normalize_target_name  # noqa: E402
+from scout import JUNK_NAME_SENTINELS, NON_COMPANY_NAMES, _is_junk_name  # noqa: E402
+from scripts.merge_duplicate_targets import merge_into  # noqa: E402
+
+# Tickers that point at a different company than the target tracks.
+# name -> (wrong ticker, why)
+MISMATCHED_TICKERS = {
+    "Motorola": ("MSI", "MSI is Motorola Solutions; this target tracks Motorola Mobility phones (Lenovo)"),
+}
+
+PASSES = ("sentinels", "countries", "duplicates", "tickers")
+
+
+def _load_targets(sb):
+    return fetch_all_rows(
+        lambda: sb.table("targets")
+        .select("id, name, target_type, status, ticker, parent_target_id")
+        .order("id")
+    )
+
+
+def _event_count(sb, target_id: int) -> int:
+    rows = sb.table("events").select("id").eq("target_id", target_id).execute().data or []
+    return len(rows)
+
+
+def clean_sentinels(sb, targets, apply: bool) -> int:
+    hits = [t for t in targets if (t["name"] or "").strip().lower() in JUNK_NAME_SENTINELS]
+    print(f"\nsentinels: {len(hits)} target(s)")
+    for t in hits:
+        events = _event_count(sb, t["id"])
+        print(f"  {'DELETE' if apply else 'would delete'} {t['id']} {t['name']!r} "
+              f"[{t['target_type']}] and its {events} event(s)")
+        if apply:
+            sb.table("events").delete().eq("target_id", t["id"]).execute()
+            sb.table("targets").delete().eq("id", t["id"]).execute()
+    return len(hits)
+
+
+def clean_countries(sb, targets, apply: bool) -> int:
+    hits = [
+        t for t in targets
+        if t["target_type"] == "COMPANY"
+        and t["status"] == "tracking"
+        and (t["name"] or "").strip().lower() in NON_COMPANY_NAMES
+    ]
+    print(f"\ncountries: {len(hits)} target(s) held as COMPANY")
+    for t in hits:
+        print(f"  {'ARCHIVE' if apply else 'would archive'} {t['id']} {t['name']!r} "
+              f"({_event_count(sb, t['id'])} event(s) kept)")
+        if apply:
+            sb.table("targets").update({"status": "archived"}).eq("id", t["id"]).execute()
+    return len(hits)
+
+
+def clean_duplicates(sb, targets, apply: bool) -> int:
+    groups = defaultdict(list)
+    for t in targets:
+        if t["status"] != "tracking":
+            continue
+        groups[(t["target_type"], normalize_target_name(t["name"]))].append(t)
+    collisions = [rows for rows in groups.values() if len(rows) > 1]
+    print(f"\nduplicates: {len(collisions)} group(s)")
+    merged = 0
+    for rows in collisions:
+        # Keep the row with a ticker, then the one with the most events, then the oldest.
+        rows = sorted(rows, key=lambda r: (r["ticker"] is None, -_event_count(sb, r["id"]), r["id"]))
+        keep, extras = rows[0], rows[1:]
+        for extra in extras:
+            print(f"  {'MERGE' if apply else 'would merge'} {extra['id']} {extra['name']!r} "
+                  f"→ {keep['id']} {keep['name']!r} (ticker {keep['ticker']})")
+            if apply:
+                merge_into(sb, keep["id"], extra["id"], dry_run=False)
+            merged += 1
+    return merged
+
+
+def clean_tickers(sb, targets, apply: bool) -> int:
+    fixed = 0
+    print(f"\ntickers: checking {len(MISMATCHED_TICKERS)} known mismatch(es)")
+    for t in targets:
+        entry = MISMATCHED_TICKERS.get((t["name"] or "").strip())
+        if not entry or t["ticker"] != entry[0]:
+            continue
+        print(f"  {'CLEAR' if apply else 'would clear'} ticker {t['ticker']} on {t['id']} {t['name']!r}"
+              f"\n      {entry[1]}")
+        if apply:
+            sb.table("targets").update({"ticker": None}).eq("id", t["id"]).execute()
+        fixed += 1
+    return fixed
+
+
+def report_generic_products(targets) -> None:
+    """List only. Many of these are real products, and the guard is for new ones."""
+    hits = []
+    for t in targets:
+        if t["target_type"] != "PRODUCT" or t["status"] != "tracking":
+            continue
+        reason = _is_junk_name(t["name"], "PRODUCT")
+        if reason:
+            hits.append((t["id"], t["name"], reason))
+    print(f"\nreview (not touched): {len(hits)} product target(s) the new guard would refuse today")
+    for tid, name, reason in hits[:20]:
+        print(f"  {tid} {name!r} — {reason}")
+    if len(hits) > 20:
+        print(f"  ... and {len(hits) - 20} more")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--apply", action="store_true", help="Write the changes (default: print only)")
+    ap.add_argument("--only", choices=PASSES, action="append", default=[],
+                    help="Run only this pass (repeatable)")
+    args = ap.parse_args()
+
+    passes = args.only or list(PASSES)
+    sb = get_supabase()
+    targets = _load_targets(sb)
+    print(f"{len(targets)} targets loaded. Mode: {'APPLY' if args.apply else 'dry run'}")
+
+    counts = {}
+    if "sentinels" in passes:
+        counts["sentinels"] = clean_sentinels(sb, targets, args.apply)
+    if "countries" in passes:
+        counts["countries"] = clean_countries(sb, targets, args.apply)
+    if "duplicates" in passes:
+        counts["duplicates"] = clean_duplicates(sb, targets, args.apply)
+    if "tickers" in passes:
+        counts["tickers"] = clean_tickers(sb, targets, args.apply)
+    report_generic_products(targets)
+
+    print("\nSummary:", ", ".join(f"{k}={v}" for k, v in counts.items()) or "nothing selected")
+    if not args.apply:
+        print("Dry run — nothing was written. Re-run with --apply.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

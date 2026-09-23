@@ -35,6 +35,7 @@ def _parse_iso_dt(ts: str) -> datetime:
 import requests
 
 from config import get_supabase
+from events import event_time, event_time_iso, sort_by_event_time
 from sentiment_dedupe import (
     dedupe_lines as _dedupe_lines,
     normalize_for_dedupe as _normalize_for_dedupe,
@@ -868,13 +869,15 @@ def fetch_todays_headlines(lookback_hours: int = 24) -> tuple:
 
     events = (
         sb.table("events")
-        .select("id, target_id, headline, created_at")
+        .select("*")
         .gte("created_at", cutoff)
         .order("created_at", desc=True)
         .limit(300)
         .execute()
         .data or []
     )
+    # Newest first by when the news broke, not when the pipeline wrote the row.
+    events = sort_by_event_time(events, reverse=True)
 
     event_ids = [e["id"] for e in events if e.get("id")]
     sentiment_map: dict = {}
@@ -1294,7 +1297,7 @@ def _source_label(url: str) -> str:
 def render_event_card(event: dict, sentiments: list) -> None:
     """Render one event as an expander; prose/cons/quotes as a clean HTML grid inside."""
     headline = (event.get("headline") or "").strip() or "Untitled event"
-    created = event.get("created_at")
+    created = event_time_iso(event) or event.get("created_at")
     if created:
         try:
             dt = _parse_iso_dt(created) if isinstance(created, str) and "T" in created else created
@@ -1921,7 +1924,9 @@ def render_news_tab(targets: list) -> None:
 
     events, sentiment_map = fetch_todays_headlines(lookback_hours)
     # Narrow to the selected day window
-    events = [e for e in events if selected_start <= _parse_iso_dt(e["created_at"]) < selected_end]
+    events = [e for e in events
+              if (event_time(e) or _parse_iso_dt(e["created_at"])) is not None
+              and selected_start <= (event_time(e) or _parse_iso_dt(e["created_at"])) < selected_end]
 
     if not events:
         st.info("No headlines tracked in the last 24 hours. Run the pipeline to fetch today's news.")
@@ -1948,7 +1953,7 @@ def render_news_tab(targets: list) -> None:
 
         # Relative time
         try:
-            evt_dt = _parse_iso_dt(e["created_at"])
+            evt_dt = event_time(e) or _parse_iso_dt(e["created_at"])
             delta = now - evt_dt
             hours = int(delta.total_seconds() // 3600)
             mins = int((delta.total_seconds() % 3600) // 60)

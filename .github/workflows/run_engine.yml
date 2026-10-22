@@ -73,7 +73,18 @@ jobs:
         run: |
           PYTHONPATH=src python src/sim_trader.py --action snapshot
 
+      # Runs whether or not the pipeline steps above succeeded: the failure this
+      # catches is a run that exits 0 while producing nothing, which is how the
+      # engine went quiet from June to September without anyone noticing.
+      - name: Check run health
+        if: always()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: PYTHONPATH=src python scripts/check_pipeline_health.py
+
       - name: Save Reports to GitHub
+        if: always()
         run: |
           git config --local user.name "github-actions[bot]"
           git config --local user.email "github-actions[bot]@users.noreply.github.com"

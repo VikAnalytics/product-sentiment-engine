@@ -1,0 +1,32 @@
+# Asks, from outside, whether the pipeline ran at all.
+#
+# Every health check inside a run needs the run to happen. When the external
+# trigger stopped on 2026-07-04 nothing failed, nothing was logged, and the
+# engine sat silent until 2026-09-19 — eleven weeks later. A watchdog cannot
+# live inside the thing it watches, so this is on GitHub's own schedule.
+name: Pipeline Heartbeat
+
+on:
+  schedule:
+    - cron: '0 2 * * *' # 02:00 UTC — 5 hours after the 17:00 ET daily run
+  workflow_dispatch:
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # supabase alone, not requirements.txt: this job only reads one table and
+      # has no reason to wait for spacy and torch to install.
+      - run: pip install supabase python-dotenv
+
+      - name: Check the pipeline has run
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: PYTHONPATH=src python scripts/check_pipeline_health.py --heartbeat --max-age-hours 26
